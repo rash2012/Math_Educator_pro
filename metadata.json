@@ -1,0 +1,6 @@
+{
+  "name": "Math Educator Pro",
+  "description": "منصة تعليمية متطورة في الرياضيات تتضمن بوابة الطالب التفاعلية، ونظام المعلم السقراطي الذكي المؤتمت بالخيارات، وتوليد الاختبارات وبنوك الأسئلة والملخصات المكثفة للشهادة الثانوية العامة.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
