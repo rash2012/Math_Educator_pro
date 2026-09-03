@@ -257,13 +257,15 @@ export const MathRenderer: React.FC<MathRendererProps> = memo(({ content, classN
           .replace(/\\\[/g, '$')
           .replace(/\\\]/g, '$')
           .replace(/\$\$/g, '$') // Convert all double dollars to single dollar as requested
-          // إزالة أي علامات \right\ أو \right مشوهة زائدة تركت خطأ عند نهاية المعادلات
-          .replace(/\\right[\\]+\s*(?=[$|\]|)|,]|\s|$)/g, '')
-          .replace(/\\right\s*\\(?=[^\w]|$)/g, '')
-          .replace(/\\right\)\s*\\right\.?/g, '\\right)')
-          .replace(/\\right\]\s*\\right\.?/g, '\\right]')
-          .replace(/\\right\\\}\s*\\right\.?/g, '\\right\\}')
-          .replace(/\\right\|\s*\\right\.?/g, '\\right|')
+          // حظر وإزالة أي علامات \right و \left في صيغ LaTeX لضمان سلامة KaTeX ومحاذاة RTL
+          .replace(/\\right\./g, '')
+          .replace(/\\left\./g, '')
+          .replace(/\\right[\\]+/g, '')
+          .replace(/\\left[\\]+/g, '')
+          .replace(/\\right(?=[()\[\]|\{\}\\])/g, '')
+          .replace(/\\left(?=[()\[\]|\{\}\\])/g, '')
+          .replace(/\\right(?![a-zA-Z])/g, '')
+          .replace(/\\left(?![a-zA-Z])/g, '')
           // تطبيع الأشعة بدقة: شعاع حرفين \overrightarrow وشعاع حرف واحد \vec
           .replace(/\\vec\{([A-Za-z]{2,})\}/g, '\\overrightarrow{$1}')
           .replace(/\\overrightarrow\{([a-zA-Z])\}/g, '\\vec{$1}')

@@ -345,6 +345,16 @@ export interface StudentProgress {
   lastActive: number;
 }
 
+export interface SyncMapping {
+  id?: number;
+  localTable: string;
+  localId: string;
+  remoteId: string;      // UUID الصف في Supabase
+  lastSyncedAt: number;
+  contentHash: string;   // لاكتشاف التعديلات غير المتزامنة
+  isPublished?: boolean; // هل تم النشر والاعتماد للطلاب أم حفظ كمسودة سحابية فقط
+}
+
 export class MathEducatorDB extends Dexie {
   documents!: Table<Document>;
   exercises!: Table<Exercise>;
@@ -361,6 +371,7 @@ export class MathEducatorDB extends Dexie {
   studentProgress!: Table<StudentProgress>;
   exerciseFamilies!: Table<ExerciseFamily>;
   exerciseStations!: Table<ExerciseStation>;
+  syncMappings!: Table<SyncMapping>;
 
   constructor() {
     super('MathEducatorDB');
@@ -479,6 +490,44 @@ export class MathEducatorDB extends Dexie {
       studentProgress: '++id, studentName, [grade+subject], unitTitle, lastActive',
       exerciseFamilies: '++id, docId, unitId, familyName, createdAt',
       exerciseStations: '++id, exerciseId, stationOrder'
+    });
+
+    this.version(17).stores({
+      documents: '++id, title, country, grade, subject, part, unit, topic, type, createdAt, updatedAt',
+      exercises: '++id, docId, order, family_id',
+      lessonSections: '++id, docId, order',
+      pdfContents: '++id, docId',
+      tests: '++id, title, country, grade, subject, difficulty, createdAt, categoryId, [grade+subject]',
+      questionBanks: '++id, title, country, grade, subject, [grade+subject]',
+      testCategories: '++id, name',
+      examSummaries: '++id, title, country, grade, subject, createdAt',
+      pastPapers: '++id, title, country, grade, subject, createdAt',
+      unitQuizzes: '++id, docId, unit, grade, subject, createdAt',
+      unitMindMaps: '++id, docId, createdAt',
+      unitComprehensiveReviews: '++id, docId, createdAt',
+      studentProgress: '++id, studentName, [grade+subject], unitTitle, lastActive',
+      exerciseFamilies: '++id, docId, unitId, familyName, createdAt',
+      exerciseStations: '++id, exerciseId, stationOrder',
+      syncMappings: '++id, [localTable+localId], remoteId, localTable'
+    });
+
+    this.version(18).stores({
+      documents: '++id, title, country, grade, subject, part, unit, topic, type, createdAt, updatedAt',
+      exercises: '++id, docId, order, family_id',
+      lessonSections: '++id, docId, order',
+      pdfContents: '++id, docId',
+      tests: '++id, title, country, grade, subject, difficulty, createdAt, categoryId, [grade+subject]',
+      questionBanks: '++id, docId, unit, title, country, grade, subject, [grade+subject]',
+      testCategories: '++id, name',
+      examSummaries: '++id, title, country, grade, subject, createdAt',
+      pastPapers: '++id, title, country, grade, subject, createdAt',
+      unitQuizzes: '++id, docId, unit, grade, subject, createdAt',
+      unitMindMaps: '++id, docId, unit, createdAt',
+      unitComprehensiveReviews: '++id, docId, unit, createdAt',
+      studentProgress: '++id, studentName, [grade+subject], unitTitle, lastActive',
+      exerciseFamilies: '++id, docId, unitId, familyName, createdAt',
+      exerciseStations: '++id, exerciseId, stationOrder',
+      syncMappings: '++id, [localTable+localId], remoteId, localTable'
     });
   }
 }

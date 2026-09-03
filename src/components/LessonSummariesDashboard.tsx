@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, type Document, type LessonSection, type PracticeExercise } from '../db';
+import { loadUnitExerciseFamilies, saveExerciseFamilyAtomic } from '../db/exerciseFamiliesRPC';
 import { MathRenderer } from './MathRenderer';
 import { 
   generateLessonSummary, 
@@ -46,7 +47,8 @@ import {
   FileSpreadsheet,
   Globe,
   GraduationCap,
-  Layers
+  Layers,
+  Cloud
 } from 'lucide-react';
 import { CustomDialog } from './ui/CustomDialog';
 import { AcademicMetadataFields } from './AcademicMetadataFields';
@@ -57,6 +59,9 @@ import { UnitComprehensiveReviewSection } from './UnitComprehensiveReviewSection
 import { UnitQuizSection } from './UnitQuizSection';
 import { UnitMindMapSection } from './UnitMindMapSection';
 import { UnifiedPageHeader } from './common/UnifiedPageHeader';
+import { SyncControlButton } from './SyncControlButton';
+import { SyncStatusBadge } from './SyncStatusBadge';
+import { UnitSyncIndicator } from './UnitSyncIndicator';
 
 export const LessonSummariesDashboard: React.FC = () => {
   // 1. Fetch from Dexie
@@ -252,24 +257,168 @@ export const LessonSummariesDashboard: React.FC = () => {
 
   const handleExportBookletJson = async (doc: Document, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
+    if (!doc.id) {
+      showAlert('خطأ', 'لم يتم العثور على معرّف الوحدة للتصدير.');
+      return;
+    }
     try {
-      const sections = await db.lessonSections.where({ docId: doc.id }).sortBy('order');
+      const docId = doc.id;
+      const numDocId = Number(docId);
+      const strDocId = String(docId);
+
+      // 1. Fetch all lesson sections sorted by order
+      const sections = await db.lessonSections.where({ docId }).sortBy('order');
+
+      // 2. Fetch Unit Comprehensive Review (المراجعة الشاملة للوحدة) with resilient fallbacks
+      let comprehensiveReview = await db.unitComprehensiveReviews.where('docId').equals(numDocId).first();
+      if (!comprehensiveReview) {
+        comprehensiveReview = await db.unitComprehensiveReviews.where('docId').equals(strDocId as any).first();
+      }
+      if (!comprehensiveReview) {
+        comprehensiveReview = await db.unitComprehensiveReviews.filter(r => 
+          Number(r.docId) === numDocId || 
+          String(r.docId) === strDocId || 
+          (Boolean(r.unit) && Boolean(doc.unit) && r.unit === doc.unit && r.grade === doc.grade) ||
+          (Boolean(r.title) && Boolean(doc.title) && r.title.includes(doc.title))
+        ).first();
+      }
+
+      // 3. Fetch Unit Quiz (اختبار الوحدة الشامل) with resilient fallbacks
+      let unitQuiz = await db.unitQuizzes.where('docId').equals(numDocId).first();
+      if (!unitQuiz) {
+        unitQuiz = await db.unitQuizzes.where('docId').equals(strDocId as any).first();
+      }
+      if (!unitQuiz) {
+        unitQuiz = await db.unitQuizzes.filter(q => 
+          Number(q.docId) === numDocId || 
+          String(q.docId) === strDocId || 
+          (Boolean(q.unit) && Boolean(doc.unit) && q.unit === doc.unit && q.grade === doc.grade) ||
+          (Boolean(q.title) && Boolean(doc.title) && q.title.includes(doc.title))
+        ).first();
+      }
+
+      // 4. Fetch Unit Mind Map (الخريطة الذهنية البصرية) with resilient fallbacks
+      let unitMindMap = await db.unitMindMaps.where('docId').equals(numDocId).first();
+      if (!unitMindMap) {
+        unitMindMap = await db.unitMindMaps.where('docId').equals(strDocId as any).first();
+      }
+      if (!unitMindMap) {
+        unitMindMap = await db.unitMindMaps.filter(m => 
+          Number(m.docId) === numDocId || 
+          String(m.docId) === strDocId || 
+          (Boolean(m.title) && Boolean(doc.title) && m.title.includes(doc.title))
+        ).first();
+      }
+
+      // 5. Fetch Pattern-Guided Trainer data (ميدان التدريب وعائلات التمارين والمحطات)
+      let exerciseFamilies = await db.exerciseFamilies.where('docId').equals(numDocId).toArray();
+      if (exerciseFamilies.length === 0) {
+        exerciseFamilies = await db.exerciseFamilies.where('docId').equals(strDocId as any).toArray();
+      }
+      if (exerciseFamilies.length === 0) {
+        exerciseFamilies = await db.exerciseFamilies.filter(f => Number(f.docId) === numDocId || String(f.docId) === strDocId).toArray();
+      }
+
+      let classifiedFamilies: any[] = [];
+      try {
+        classifiedFamilies = await loadUnitExerciseFamilies(docId);
+      } catch (famErr) {
+        console.warn('Could not load classified exercise families:', famErr);
+      }
+
+      // Collect all exercise IDs from practice sections to fetch their stations
+      const exerciseIds: (string | number)[] = [];
+      sections.forEach(s => {
+        s.practiceExercises?.forEach(pe => { if (pe.id) exerciseIds.push(pe.id); });
+      });
+
+      let exerciseStations: any[] = [];
+      if (exerciseIds.length > 0) {
+        exerciseStations = await db.exerciseStations.where('exerciseId').anyOf(exerciseIds).toArray();
+      }
+
+      // 6. Fetch PDF Content if attached
+      let pdfContent = await db.pdfContents.where('docId').equals(numDocId).first();
+      if (!pdfContent) {
+        pdfContent = await db.pdfContents.where('docId').equals(strDocId as any).first();
+      }
+
       const exportData = {
-        booklet: doc,
-        sections: sections,
+        type: 'comprehensive_unit_package',
+        version: '3.0',
         exportedAt: new Date().toISOString(),
-        version: '2.0'
+        document: {
+          ...doc,
+          unitComprehensiveReview: comprehensiveReview || null,
+          unitQuiz: unitQuiz || null,
+          unitMindMap: unitMindMap || null
+        },
+        booklet: {
+          ...doc,
+          unitComprehensiveReview: comprehensiveReview || null,
+          unitQuiz: unitQuiz || null,
+          unitMindMap: unitMindMap || null
+        }, // for backward compatibility with v2.0
+        sections: sections.map(sec => {
+          const additions = getSectionAdditions(sec);
+          return {
+            ...sec,
+            guidanceLabel: additions.guidanceLabel,
+            guidance: additions.guidance,
+            notesLabel: additions.notesLabel,
+            notes: additions.notes,
+            trapsLabel: additions.trapsLabel,
+            traps: additions.traps,
+            examGuidanceLabel: additions.examGuidanceLabel,
+            examGuidance: additions.examGuidance,
+            exampleLabel: additions.exampleLabel,
+            exampleText: additions.exampleText,
+            exampleSvg: additions.exampleSvg || '',
+            solutionLabel: additions.solutionLabel,
+            solutionText: additions.solutionText,
+            extraExampleLabel: additions.extraExampleLabel,
+            extraExampleText: additions.extraExampleText,
+            extraExampleSvg: additions.extraExampleSvg || '',
+            extraSolutionLabel: additions.extraSolutionLabel,
+            extraSolutionText: additions.extraSolutionText,
+            practiceExercises: sec.practiceExercises || [],
+            practicalExercises: sec.practicalExercises || []
+          };
+        }),
+        exerciseFamilies,
+        exerciseStations,
+        classifiedFamilies,
+        unitComprehensiveReview: comprehensiveReview || null,
+        comprehensiveReview: comprehensiveReview || null,
+        unitQuiz: unitQuiz || null,
+        quiz: unitQuiz || null,
+        unitMindMap: unitMindMap || null,
+        mindMap: unitMindMap || null,
+        pdfContent: pdfContent ? { textContent: pdfContent.textContent, structuredContent: pdfContent.structuredContent } : null
       };
-      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(exportData, null, 2));
+
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
       const downloadAnchorNode = document.createElement('a');
-      downloadAnchorNode.setAttribute("href", dataStr);
-      downloadAnchorNode.setAttribute("download", `${doc.title || 'lesson_summary'}.json`);
+      downloadAnchorNode.setAttribute("href", url);
+      const safeTitle = (doc.title || doc.unit || 'نوطة_الوحدة_الشاملة').replace(/[/\\?%*:|"<> ]/g, '_');
+      downloadAnchorNode.setAttribute("download", `وحدة_شاملة_${safeTitle}.json`);
       document.body.appendChild(downloadAnchorNode);
       downloadAnchorNode.click();
-      downloadAnchorNode.remove();
-    } catch (err) {
+      document.body.removeChild(downloadAnchorNode);
+      URL.revokeObjectURL(url);
+
+      const reviewStatus = comprehensiveReview ? 'المراجعة الشاملة للوحدة ✅' : 'المراجعة الشاملة (لم تُنشأ بعد ⚠️)';
+      const quizStatus = unitQuiz ? `اختبار الوحدة (${unitQuiz.questions?.length || 0} أسئلة) ✅` : 'اختبار الوحدة (لم يُنشأ بعد ⚠️)';
+      const mindMapStatus = unitMindMap ? 'الخريطة المفاهيمية البصرية ✅' : 'الخريطة المفاهيمية (لم تُنشأ بعد ⚠️)';
+
+      showAlert(
+        'اكتمل تصدير الوحدة الشاملة 💾🎉', 
+        `تم تصدير ملف JSON الشامل بنجاح:\n• عدد الفقرات والدروس: ${sections.length}\n• ${reviewStatus}\n• ${quizStatus}\n• ${mindMapStatus}\n• عائلات التمارين والمحطات: ${exerciseFamilies.length > 0 ? `${exerciseFamilies.length} عائلة ✅` : 'جاهزة للتوليد'}`
+      );
+    } catch (err: any) {
       console.error("Export booklet JSON failed", err);
-      showAlert('خطأ', 'فشل تصدير كراسة التبسيط كملف JSON');
+      showAlert('خطأ', err?.message || 'فشل تصدير كراسة التبسيط كملف JSON');
     }
   };
 
@@ -538,68 +687,10 @@ export const LessonSummariesDashboard: React.FC = () => {
     URL.revokeObjectURL(url);
   };
 
-  // Export active summary to JSON
+  // Export active summary to JSON (Complete Unit Package)
   const downloadAsJson = () => {
     if (!activeSummary) return;
-    
-    const exportBundle = {
-      type: 'lesson_summary_package',
-      version: 1,
-      document: {
-        title: activeSummary.title,
-        grade: activeSummary.grade,
-        subject: activeSummary.subject,
-        part: activeSummary.part || '',
-        unit: activeSummary.unit || '',
-        topic: activeSummary.topic || 'نوطة الدروس الشاملة',
-        seriesName: activeSummary.seriesName || '',
-        teacherName: activeSummary.teacherName || '',
-        teacherRole: activeSummary.teacherRole || ''
-      },
-      sections: summarySections.map(sec => {
-        const additions = getSectionAdditions(sec);
-        return {
-          title: sec.title,
-          content: sec.content,
-          svgCode: sec.svgCode || '',
-          order: sec.order,
-          guidanceLabel: additions.guidanceLabel,
-          guidance: additions.guidance,
-          notesLabel: additions.notesLabel,
-          notes: additions.notes,
-          trapsLabel: additions.trapsLabel,
-          traps: additions.traps,
-          examGuidanceLabel: additions.examGuidanceLabel,
-          examGuidance: additions.examGuidance,
-          exampleLabel: additions.exampleLabel,
-          exampleText: additions.exampleText,
-          exampleSvg: additions.exampleSvg || '',
-          solutionLabel: additions.solutionLabel,
-          solutionText: additions.solutionText,
-          extraExampleLabel: additions.extraExampleLabel,
-          extraExampleText: additions.extraExampleText,
-          extraExampleSvg: additions.extraExampleSvg || '',
-          extraSolutionLabel: additions.extraSolutionLabel,
-          extraSolutionText: additions.extraSolutionText,
-          practiceExercises: sec.practiceExercises || [],
-          practicalExercises: sec.practicalExercises || [],
-          conceptLabel: sec.conceptLabel ?? 'صياغة الفكرة بأسلوب الطالب والتبسيط العلمي الموجه:',
-          practiceSectionLabel: sec.practiceSectionLabel ?? 'فقرة "تدرّب" من الكتاب المقرّر لهذا المفهوم:',
-          practicalSectionLabel: sec.practicalSectionLabel ?? '📌 التطبيق العملي للفقرة من الكتاب:'
-        };
-      })
-    };
-
-    const blob = new Blob([JSON.stringify(exportBundle, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    const fileName = `نوطة_${activeSummary.title.replace(/\s+/g, '_')}.json`;
-    link.download = fileName;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    handleExportBookletJson(activeSummary);
   };
 
   // Add imported section data to a specific summary document
@@ -701,7 +792,7 @@ export const LessonSummariesDashboard: React.FC = () => {
     }
   };
 
-  // Import summary or single section from JSON
+  // Import summary or single section from JSON (Complete Unit Package & Legacy Support)
   const handleImportJson = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -731,16 +822,17 @@ export const LessonSummariesDashboard: React.FC = () => {
           return;
         }
 
-        // 2. Check if it's a full booklet / lesson summary (Supports v2.0 `booklet`, v1.0 `document`, or direct summary object with `sections`)
-        const docData = data.booklet || data.document || (Array.isArray(data.sections) ? data : null);
+        // 2. Check if it's a full unit / booklet / lesson summary (Supports v3.0 `comprehensive_unit_package`, v2.0 `booklet`, v1.0 `document`, or direct summary object with `sections`)
+        const docData = data.document || data.booklet || (Array.isArray(data.sections) ? data : null);
         const rawSections = Array.isArray(data.sections) ? data.sections : (Array.isArray(docData?.sections) ? docData.sections : null);
 
         if (!docData || !Array.isArray(rawSections)) {
-          throw new Error('صيغة ملف JSON المرفوع غير صالحة، يرجى رفع ملف نوطة درس كاملة أو ملف فقرة مهيكلة بشكل صحيح.');
+          throw new Error('صيغة ملف JSON المرفوع غير صالحة، يرجى رفع ملف نوطة درس/وحدة شاملة أو ملف فقرة مهيكلة بشكل صحيح.');
         }
 
-        const bookletTitle = docData.title || data.title || 'نوطة درس مستوردة';
+        const bookletTitle = docData.title || data.title || 'نوطة وحدة دراسية شاملة مستوردة';
 
+        // 2.1 Insert Document Record
         const newDocId = await db.documents.add({
           title: bookletTitle,
           grade: docData.grade || DEFAULT_METADATA.grade || 'الثالث الثانوي العلمي',
@@ -753,10 +845,12 @@ export const LessonSummariesDashboard: React.FC = () => {
           seriesName: docData.seriesName || 'سلسلة التبسيط المفهومي الذكية 📚✨',
           teacherName: docData.teacherName || 'حسن راشد العلي',
           teacherRole: docData.teacherRole || 'مدرّس مادة الرياضيات والعلوم التفاعلية',
+          familiesAnalysis: docData.familiesAnalysis || '',
           createdAt: typeof docData.createdAt === 'number' ? docData.createdAt : Date.now(),
           updatedAt: Date.now()
         });
 
+        // 2.2 Insert Lesson Sections
         let importOrder = 0;
         for (const sec of rawSections) {
           const isPractice = Boolean(sec.isPracticeOnly || (!sec.content && sec.practiceExercises && sec.practiceExercises.length > 0));
@@ -834,8 +928,144 @@ export const LessonSummariesDashboard: React.FC = () => {
           }
         }
 
-        showAlert('اكتمل الاستيراد 🎉', `تم استيراد كراسة النوطة المدرسية الشاملة لـ "${bookletTitle}" بنجاح مع كافة الأفكار والتطبيقات والرسوم والمسائل.`);
+        // 2.3 Import Unit Comprehensive Review (المراجعة الشاملة للوحدة)
+        let hasImportedReview = false;
+        const revData = data.unitComprehensiveReview || data.comprehensiveReview || docData.unitComprehensiveReview || docData.comprehensiveReview;
+        if (revData && typeof revData === 'object') {
+          await db.unitComprehensiveReviews.add({
+            docId: newDocId,
+            title: revData.title || `مراجعة شاملة: ${docData.unit || bookletTitle}`,
+            unit: revData.unit || docData.unit || bookletTitle,
+            grade: revData.grade || docData.grade || DEFAULT_METADATA.grade,
+            subject: revData.subject || docData.subject || DEFAULT_METADATA.subject,
+            summaryText: revData.summaryText || '',
+            definitions: Array.isArray(revData.definitions) ? revData.definitions : [],
+            theorems: Array.isArray(revData.theorems) ? revData.theorems : [],
+            results: Array.isArray(revData.results) ? revData.results : [],
+            trapsAndTips: Array.isArray(revData.trapsAndTips) ? revData.trapsAndTips : [],
+            formulasSummary: revData.formulasSummary || '',
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+          });
+          hasImportedReview = true;
+        }
+
+        // 2.4 Import Unit Quiz (اختبار الوحدة الشامل)
+        let hasImportedQuiz = false;
+        const quizData = data.unitQuiz || data.quiz || docData.unitQuiz || docData.quiz;
+        if (quizData && typeof quizData === 'object' && Array.isArray(quizData.questions) && quizData.questions.length > 0) {
+          await db.unitQuizzes.add({
+            docId: newDocId,
+            title: quizData.title || `اختبار الوحدة الشامل: ${docData.unit || bookletTitle}`,
+            unit: quizData.unit || docData.unit || bookletTitle,
+            grade: quizData.grade || docData.grade || DEFAULT_METADATA.grade,
+            subject: quizData.subject || docData.subject || DEFAULT_METADATA.subject,
+            totalQuestions: typeof quizData.totalQuestions === 'number' ? quizData.totalQuestions : quizData.questions.length,
+            passingScore: typeof quizData.passingScore === 'number' ? quizData.passingScore : 70,
+            questions: quizData.questions,
+            validationScore: quizData.validationScore,
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+          });
+          hasImportedQuiz = true;
+        }
+
+        // 2.5 Import Unit Mind Map (الخريطة الذهنية البصرية)
+        let hasImportedMindMap = false;
+        const mindMapData = data.unitMindMap || data.mindMap || docData.unitMindMap || docData.mindMap;
+        if (mindMapData && typeof mindMapData === 'object' && (mindMapData.svgCode || mindMapData.treeData || mindMapData.markdownSchema)) {
+          await db.unitMindMaps.add({
+            docId: newDocId,
+            title: mindMapData.title || `خريطة المفاهيم: ${docData.unit || bookletTitle}`,
+            svgCode: mindMapData.svgCode || '',
+            markdownSchema: mindMapData.markdownSchema || '',
+            treeData: mindMapData.treeData || null,
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+          });
+          hasImportedMindMap = true;
+        }
+
+        // 2.6 Import Pattern-Guided Trainer (ميدان التدريب وعائلات التمارين والمحطات)
+        let hasImportedFamilies = false;
+        if (Array.isArray(data.classifiedFamilies) && data.classifiedFamilies.length > 0) {
+          for (const fam of data.classifiedFamilies) {
+            await saveExerciseFamilyAtomic(newDocId, fam);
+          }
+          hasImportedFamilies = true;
+        } else if (Array.isArray(data.exerciseFamilies) && data.exerciseFamilies.length > 0) {
+          const familyIdMap = new Map<string | number, string | number>();
+          for (const fam of data.exerciseFamilies) {
+            const oldId = fam.id;
+            const { id, ...famData } = fam;
+            const newFamilyId = await db.exerciseFamilies.add({
+              ...famData,
+              docId: newDocId,
+              createdAt: famData.createdAt || Date.now(),
+              updatedAt: Date.now()
+            });
+            if (oldId !== undefined) {
+              familyIdMap.set(oldId, newFamilyId);
+            }
+          }
+          // Remap family_id in lessonSections practice exercises
+          const insertedSections = await db.lessonSections.where('docId').equals(newDocId).toArray();
+          for (const s of insertedSections) {
+            if (s.practiceExercises && s.practiceExercises.length > 0) {
+              let changed = false;
+              const remapped = s.practiceExercises.map(pe => {
+                if (pe.family_id !== undefined && familyIdMap.has(pe.family_id)) {
+                  changed = true;
+                  return { ...pe, family_id: familyIdMap.get(pe.family_id) };
+                }
+                return pe;
+              });
+              if (changed && s.id) {
+                await db.lessonSections.update(s.id, { practiceExercises: remapped });
+              }
+            }
+          }
+          if (Array.isArray(data.exerciseStations) && data.exerciseStations.length > 0) {
+            for (const st of data.exerciseStations) {
+              const { id, ...stData } = st;
+              await db.exerciseStations.add({
+                ...stData,
+                choices: Array.isArray(stData.choices) ? stData.choices : [],
+                createdAt: stData.createdAt || Date.now(),
+                updatedAt: Date.now()
+              });
+            }
+          }
+          hasImportedFamilies = true;
+        }
+
+        // 2.7 Import PDF Content if available
+        const pdfData = data.pdfContent || docData.pdfContent;
+        if (pdfData && typeof pdfData === 'object' && (pdfData.textContent || pdfData.structuredContent)) {
+          await db.pdfContents.add({
+            docId: newDocId,
+            textContent: pdfData.textContent || '',
+            structuredContent: pdfData.structuredContent || ''
+          });
+        }
+
+        // 2.8 Switch active state and show comprehensive confirmation
         setActiveSummaryId(newDocId);
+        const updatedSecs = await db.lessonSections.where({ docId: newDocId }).sortBy('order');
+        setSummarySections(updatedSecs);
+
+        const summaryBadges: string[] = [
+          `📖 الدروس والفقرات النظريّة والتطبيقيّة (${rawSections.length} فقرة)`
+        ];
+        if (hasImportedFamilies) summaryBadges.push(`🎯 ميدان التدريب بالأنماط وعائلات التمارين`);
+        if (hasImportedReview) summaryBadges.push(`📚 المراجعة الشاملة للوحدة (تعاريف، مبرهنات، نتائج، مطبات)`);
+        if (hasImportedQuiz) summaryBadges.push(`📝 اختبار الوحدة الشامل وسلالم التصحيح`);
+        if (hasImportedMindMap) summaryBadges.push(`🗺️ الخريطة الذهنية البصرية التفاعلية`);
+
+        showAlert(
+          'اكتمل استيراد بيانات الوحدة بالكامل 🎉',
+          `تم استيراد كافة مكونات "${bookletTitle}" بنجاح وتثبيتها محلياً:\n\n• ` + summaryBadges.join('\n• ')
+        );
       } catch (err: any) {
         console.error(err);
         showAlert('فشل الاستيراد ❌', err.message || 'فشل تحليل ملف JSON المستورد وعرضه.');
@@ -2521,6 +2751,34 @@ export const LessonSummariesDashboard: React.FC = () => {
       {activeSummary && activeSummaryId ? (
         <div id="active-summary-wrapper" className="space-y-6">
           
+          {/* Top-Level Manual Sync & Publishing Status Bar */}
+          <div className="bg-gradient-to-r from-violet-50 via-indigo-50 to-purple-50 border border-violet-200 rounded-2xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-xs no-print transition-all">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-violet-600 text-white flex items-center justify-center shadow-xs flex-shrink-0">
+                <Cloud size={20} />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h4 className="text-sm font-black text-slate-900">اعتماد ونشر الوحدة سحابياً للطلاب (Supabase)</h4>
+                  <UnitSyncIndicator docId={activeSummary.id!} compact={false} />
+                </div>
+                <p className="text-xs text-slate-500 font-medium mt-0.5">
+                  الحفظ المحلي (Dexie) تلقائي وفوري • المزامنة السحابية هي فعل النشر للطلاب وتتم يدوياً عند رغبتك بالضغط على الزر
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2.5 w-full md:w-auto justify-end flex-wrap">
+              <SyncControlButton
+                table="documents"
+                id={activeSummary.id!}
+                data={activeSummary}
+                showDraftOption={true}
+                buttonText="نشر واعتماد الوحدة بالكامل"
+              />
+            </div>
+          </div>
+
           {/* Action Bar */}
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center p-4 bg-white rounded-2xl border border-gray-100 shadow-sm gap-4 no-print transition-all">
             <button 
@@ -3206,6 +3464,12 @@ export const LessonSummariesDashboard: React.FC = () => {
                       )}
                       {/* Section Administrative Actions Menu (Hidden in Print) */}
                       <div className="absolute left-4 top-4 flex items-center gap-1.5 no-print bg-white/95 backdrop-blur-md p-2 rounded-xl shadow-md border border-gray-150 z-[100] transition-all">
+                        <SyncStatusBadge
+                          table="lessonSections"
+                          id={sec.id!}
+                          data={sec}
+                          compact={true}
+                        />
                         <button 
                           onClick={() => reorderSection(idx, 'up')}
                           disabled={idx === 0}
@@ -5284,21 +5548,7 @@ export const LessonSummariesDashboard: React.FC = () => {
                                       </div>
                                     )}
 
-                                    {/* Training Field (ميدان التدريب) */}
-                                    <div className="pt-4 mt-4 border-t border-violet-100 no-print">
-                                      <PatternGuidedTrainer
-                                        exercise={ex}
-                                        sectionId={sec.id!}
-                                        lessonTitle={activeSummary?.title}
-                                        unitTitle={activeSummary?.unit}
-                                        grade={activeSummary?.grade}
-                                        subject={activeSummary?.subject}
-                                        isAdmin={true}
-                                        onUpdateExercise={async (updatedEx) => {
-                                          await handleSaveManualExercise(sec.id!, true, updatedEx);
-                                        }}
-                                      />
-                                    </div>
+
                                   </div>
                                 ))}
 
@@ -5691,9 +5941,12 @@ export const LessonSummariesDashboard: React.FC = () => {
                     <div>
                       {/* Top Header Row */}
                       <div className="flex justify-between items-start gap-3 mb-3">
-                        <span className="text-[10px] font-black px-2.5 py-0.5 rounded-lg border bg-purple-50 text-purple-700 border-purple-100">
-                          نوطة تبسيط الدروس
-                        </span>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-[10px] font-black px-2.5 py-0.5 rounded-lg border bg-purple-50 text-purple-700 border-purple-100">
+                            نوطة تبسيط الدروس
+                          </span>
+                          <UnitSyncIndicator docId={sum.id!} compact={true} />
+                        </div>
                         <div className="flex items-center gap-1">
                           <button
                             type="button"

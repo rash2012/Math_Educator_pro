@@ -73,7 +73,7 @@ ${ex.solutionText ? `الحل المتاح: ${ex.solutionText}\n` : ''}`;
 4. حظر الجداء الخارجي للأشعة (المعتمد هو الجداء السلمي فقط).
 5. قواعد LaTeX الصارمة:
    - عرّف LaTeX ككود برمجي لا يُمس، واحرص على كتابة الأوامر كاملة دون حذف الشرطة المائلة '\\' (مثل \\frac, \\sqrt, \\lim, إلخ).
-   - استخدام \\left و \\right للأقواس المتطابقة بشكل سليم.
+   - حظر استخدام \\right و \\left: يُمنع استخدام \\right أو \\left، وتُكتب الأقواس والحواصر بصيغتها المباشرة ( ... ) و [ ... ] و | ... | و \\{ ... \\}.
    - للشعاع بحرف واحد: استخدم فقط \\vec{u} (مثل \\vec{u}, \\vec{v}).
    - للشعاع بين نقطتين: استخدم فقط \\overrightarrow{AB} (مثل \\overrightarrow{AB}, \\overrightarrow{CD}).
    - صياغة LaTeX بمحددات الدولار المفردة '$...$' فقط.
@@ -189,7 +189,7 @@ ${ne.solutionText ? `الحل المعتمد: ${ne.solutionText}` : ''}
 
 المطلوب لكل تمرين توليد 4 محطات متسلسلة، ويجب أن تحتوي **كل محطة من المحطات الأربع** على:
 1. سؤال موجه (question_text).
-2. قائمة إجابات مقترحة (choices: 3 أو 4 خيارات، أو خيارين صح/خطأ)، خيار واحد صحيح (isCorrect: true) والبقية مشتتات مع تشخيص دقيق للخطأ (misconceptionDiagnosis).
+2. قائمة إجابات مقترحة (choices: نمط مختلط وذكي: إما خيارين صح/خطأ أو 3-4 خيارات حسب طبيعة السؤال وسياق المحطة)، مع خيار واحد صحيح (isCorrect: true) والبقية مشتتات مع تشخيص دقيق للخطأ (misconceptionDiagnosis).
 3. تلميحات مفاهيمية متدرجة (hint_level1, hint_level2, skip_explanation, concept_map).
 
 المحطات الأربع:
@@ -198,10 +198,11 @@ ${ne.solutionText ? `الحل المعتمد: ${ne.solutionText}` : ''}
 - المحطة 3: الخطوة التنفيذية والتحويل الجبري المفصلي الأول.
 - المحطة 4: الناتج النهائي والخلاصة الرياضية.
 
-قواعد صارمة:
-- صياغة LaTeX بمحددات '$...$' مفردة حصراً (يُمنع '$$').
+قواعد وضوابط إلزامية:
+- الإيجاز والاختصار الشديد: يجب أن تكون الإجابات والخيارات والأسئلة التوضيحية والتلميحات موجزة ومختصرة ومباشرة دون حشو لفظي لتوفير تركيز بصري وسرعة استيعاب.
+- صياغة LaTeX بمحددات '$...$' مفردة حصراً (يُمنع منعاً باتاً استخدام '$$').
 - قواعد LaTeX الصارمة: عرّف LaTeX ككود لا يُمس واكتب الأوامر كاملة دون حذف الشرطات المائلة '\\' (مثل \\frac, \\sqrt, \\lim, إلخ).
-- استخدام \\left و \\right للأقواس المتطابقة بشكل سليم.
+- حظر استخدام \\right و \\left: يُمنع استخدام \\right أو \\left، وتُكتب الأقواس والحواصر بصيغتها المباشرة ( ... ) و [ ... ] و | ... | و \\{ ... \\}.
 - للشعاع بحرف واحد: \\vec{u} حصراً، وللشعاع بحرفين بين نقطتين: \\overrightarrow{AB} حصراً.
 - فحص وتدقيق كل معادلة والتأكد من صحتها الحسابية قبل الإخراج.
 - مصطلحات سورية دقيقة ("تابع" بدلاً من "دالة"، حظر الجداء الخارجي وحظر \\sum للمجاميع).
@@ -407,7 +408,7 @@ ${exercisesFormatted}
 3. قواعد LaTeX الصارمة:
    - استخدام LaTeX بين علامات '$...$' مفردة حصراً (يُمنع '$$').
    - عرّف LaTeX ككود لا يُمس واكتب الأوامر كاملة دون حذف الشرطة المائلة '\\' (مثل \\frac, \\sqrt, \\lim).
-   - استخدام \\left و \\right للأقواس المتطابقة بشكل سليم.
+   - حظر استخدام \\right و \\left: يُمنع استخدام \\right أو \\left، وتُكتب الأقواس والحواصر بصيغتها المباشرة ( ... ) و [ ... ] و | ... | و \\{ ... \\}.
    - للشعاع بحرف واحد: \\vec{u} حصراً، وللشعاع بين نقطتين: \\overrightarrow{AB} حصراً.
    - فحص كل معادلة وصيغة رياضية قبل إخراجها.
 4. استخدام "تابع" بدلاً من "دالة"، وحظر \\sum للمجاميع والجداء الخارجي.
@@ -567,7 +568,7 @@ ${exercisesFormatted}
 }
 
 /**
- * ⚡ Generates suggested choices (MCQ 3-4 options or True/False) for a single station of an exercise.
+ * ⚡ Generates suggested choices (MCQ, True/False, or Context-driven Mixed mode) for a single station of an exercise.
  */
 export async function generateStationChoicesAI(
   unitTitle: string,
@@ -575,16 +576,24 @@ export async function generateStationChoicesAI(
   exerciseQuestion: string,
   stationOrder: 1 | 2 | 3 | 4,
   stationQuestion: string,
-  mode: 'mcq' | 'true_false' = 'mcq'
+  mode: 'mcq' | 'true_false' | 'mixed' = 'mixed'
 ): Promise<{
   choices: Array<{ id?: string; text: string; isCorrect: boolean; misconceptionDiagnosis?: string }>;
   correctChoiceIndex: number;
   correctIndex: number;
 }> {
-  const isTF = mode === 'true_false';
+  let modeInstruction = '';
+  if (mode === 'true_false') {
+    modeInstruction = 'صح أو خطأ (عبارة تقييمية مع خيارين فقط: صح / خطأ مع تشخيص للمشتت).';
+  } else if (mode === 'mcq') {
+    modeInstruction = 'اختيار من متعدد (3 أو 4 خيارات موجزة مع خيار واحد صحيح وثلاثة مشتتات).';
+  } else {
+    // Mixed mode: Contextually decide based on station nature
+    modeInstruction = 'مختلط وذكي حسب سياق المحطة الرياضي (اختر الأنسب تلقائياً: إما عبارة صح/خطأ خيارين إذا كان السؤال تقييم صحة عبارة أو شرط، أو 4 خيارات اختيار من متعدد إذا كان حساب ناتج أو اختيار قانون/علاقة).';
+  }
   
   const prompt = `أنت خبير رياضيات تربوي للمنهاج السوري للبكالوريا.
-المطلوب توليد خيارات مقترحة للسؤال الموجه في المحطة ${stationOrder} لتمرين في وحدة "${unitTitle}".
+المطلوب توليد خيارات مقترحة وموجزة جداً للسؤال الموجه في المحطة ${stationOrder} لتمرين في وحدة "${unitTitle}".
 
 بيانات المسألة:
 - عنوان المسألة: ${exerciseTitle}
@@ -594,28 +603,32 @@ ${exerciseQuestion}
 السؤال الموجه في المحطة ${stationOrder}:
 "${stationQuestion}"
 
-نوع الخيارات المطلوبة: ${isTF ? 'صح أو خطأ (True/False عبارة تقييمية مع خيارين)' : 'اختيار من متعدد (3 أو 4 خيارات مع خيار واحد صحيح وثلاثة مشتتات)'}.
+نوع الخيارات المطلوبة: ${modeInstruction}
 
-القواعد:
-1. صياغة دقيقة باللغة العربية والرموز الرياضية '$...$' مفردة حصراً (يُمنع '$$').
-2. قواعد LaTeX الصارمة: عرّف LaTeX ككود لا يُمس واكتب الأوامر كاملة دون حذف '\\' (استخدم \\left و \\right للأقواس، وللشعاع بحرف واحد \\vec{u} وللشعاع بين نقطتين \\overrightarrow{AB}).
-3. افحص كل معادلة رياضية وتأكد من صحتها الحسابية قبل الإخراج.
-4. خيار واحد فقط هو الصحيح (isCorrect: true).
-5. لكل خيار خاطئ، اكتب تشخيصاً دقيقاً لسبب الخطأ أو الفخ (misconceptionDiagnosis).
-6. استخدم "تابع" بدلاً من "دالة"، ولا تستخدم \\sum أو الجداء الخارجي.
+القواعد والضوابط الإلزامية:
+1. الإيجاز والاختصار الشديد: يجب أن تكون الإجابات والخيارات والأسئلة التوضيحية موجزة، مباشرة، ومركزة ومختصرة نوعاً ما بدون حشو لفظي أو تطويل غير مبرر لتسهيل الاستيعاب السريع والتركيز البصري.
+2. صياغة دقيقة باللغة العربية والرموز الرياضية '$...$' مفردة حصراً (يُمنع منعاً باتاً استخدام '$$').
+3. قواعد LaTeX الصارمة:
+   - عرّف LaTeX ككود برمجي لا يُمس واكتب الأوامر كاملة دون إسقاط أي شرطة مائلة '\\' (مثل \\frac, \\sqrt, \\lim, \\vec, \\overrightarrow).
+   - حظر استخدام \\right و \\left: يُمنع استخدام \\right أو \\left، وتُكتب الأقواس والحواصر بصيغتها المباشرة ( ... ) و [ ... ] و | ... | و \\{ ... \\}.
+   - للشعاع بحرف واحد: \\vec{u} حصراً، وللشعاع بين نقطتين: \\overrightarrow{AB} حصراً.
+4. افحص كل معادلة رياضية وتأكد من صحتها الحسابية 100% قبل الإخراج.
+5. خيار واحد فقط هو الصحيح (isCorrect: true).
+6. لكل خيار خاطئ، اكتب تشخيصاً موجزاً وواضحاً لسبب الخطأ أو الفخ الرياضي (misconceptionDiagnosis).
+7. استخدم "تابع" بدلاً من "دالة"، ولا تستخدم \\sum أو الجداء الخارجي.
 
 أخرج JSON صالحاً:
 {
   "choices": [
     {
-      "text": "نص الخيار",
+      "text": "نص الخيار الموجز والمباشر",
       "isCorrect": true,
       "misconceptionDiagnosis": "إجابة صحيحة ومتقنة ✅"
     },
     {
-      "text": "نص خيار خاطئ",
+      "text": "نص خيار خاطئ موجز",
       "isCorrect": false,
-      "misconceptionDiagnosis": "تشخيص سبب الخطأ"
+      "misconceptionDiagnosis": "تشخيص سبب الخطأ باختصار"
     }
   ]
 }
@@ -642,7 +655,7 @@ ${exerciseQuestion}
   }));
 
   if (formattedChoices.length === 0) {
-    if (isTF) {
+    if (mode === 'true_false') {
       formattedChoices = [
         { id: `c_${stationOrder}_1`, text: 'العبارة صحيحة ومحققة تماماً', isCorrect: true, misconceptionDiagnosis: 'صحيح ومستوفٍ للشروط ✅' },
         { id: `c_${stationOrder}_2`, text: 'العبارة خاطئة وغير مستوفية للشرط', isCorrect: false, misconceptionDiagnosis: 'تأكد من شرط الاستمرار ومجموعة التعريف' }
@@ -669,13 +682,14 @@ ${exerciseQuestion}
 export async function generateAllStationsChoicesForFamilyAI(
   family: ClassifiedFamilyData,
   unitTitle: string,
-  mode: 'mcq' | 'true_false' = 'mcq',
+  mode: 'mcq' | 'true_false' | 'mixed' = 'mixed',
   onProgress?: (message: string, progress: number) => void
 ): Promise<ClassifiedFamilyData> {
   const nonLeadExercises = family.exercises.filter(e => !e.isLeadExercise);
   if (nonLeadExercises.length === 0) return family;
 
-  if (onProgress) onProgress(`جاري توليد الخيارات المقترحة لمحطات عائلة "${family.familyName}"...`, 10);
+  const modeLabel = mode === 'true_false' ? 'صح/خطأ' : mode === 'mcq' ? 'اختيار من متعدد' : 'مختلط (صح/خطأ أو 4 خيارات)';
+  if (onProgress) onProgress(`جاري توليد الخيارات المقترحة والموجزة لمحطات عائلة "${family.familyName}" (${modeLabel})...`, 10);
 
   const updatedExercises = [...family.exercises];
 
@@ -713,7 +727,7 @@ export async function generateAllStationsChoicesForFamilyAI(
         stIndex = updatedStations.length - 1;
       }
 
-      // Generate choices for this station
+      // Generate choices for this station (mixed or specific)
       const { choices, correctIndex } = await generateStationChoicesAI(
         unitTitle,
         ex.title,

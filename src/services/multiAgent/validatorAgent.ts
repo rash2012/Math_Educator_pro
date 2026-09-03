@@ -12,7 +12,7 @@ export class ValidatorAgent {
    * - Treats LaTeX as inviolable code (كود برمجي لا يُمس)
    * - Enforces single dollar rule ($ ... $) strictly, replacing $$ with $
    * - Prevents missing backslashes and mandates complete command names (\frac, \sqrt, etc.)
-   * - Ensures \left and \right delimiters are paired properly
+   * - Allows \right and \left modifiers for complex structures, but discourages them for simple vectors.
    * - Single-letter vector MUST strictly use \vec{u} (e.g. \vec{u}, \vec{v}, \vec{w})
    * - Two-letter vector between two points MUST strictly use \overrightarrow{AB}
    * - Enforces Syrian curriculum constraints (replaces \sum with \cdots, converts cross product notation to \cdot)
@@ -64,14 +64,7 @@ export class ValidatorAgent {
     repairedText = repairedText.replace(/\$([^\$]+)\$/g, (_match, mathInner) => {
       let repairedInner = mathInner;
 
-      // A) Clean corrupted dangling \right\ or duplicate \right at end of equations
-      repairedInner = repairedInner
-        .replace(/\\right[\\]+\s*$/g, '')
-        .replace(/\\right\s*\\(?=[^\w]|$)/g, '')
-        .replace(/\\right\)\s*\\right\.?/g, '\\right)')
-        .replace(/\\right\]\s*\\right\.?/g, '\\right]')
-        .replace(/\\right\\\}\s*\\right\.?/g, '\\right\\}')
-        .replace(/\\right\|\s*\\right\.?/g, '\\right|');
+      // A) (Removed aggressive stripping of \left and \right to allow them when needed)
 
       // B) Fix missing leading backslash for standard distinct LaTeX commands
       repairedInner = repairedInner
@@ -84,31 +77,6 @@ export class ValidatorAgent {
         .replace(/(?<!\\)\b(lim)\b(?=_|\s)/g, '\\lim')
         .replace(/(?<!\\)\b(infty)\b/g, '\\infty')
         .replace(/(?<!\\)\b(cdot)\b/g, '\\cdot');
-
-      // C) Accurately count and balance \left and \right delimiters
-      // Note: \left and \right only act as delimiters when followed by non-alpha characters
-      const leftCount = (repairedInner.match(/\\left(?![a-zA-Z])/g) || []).length;
-      const rightCount = (repairedInner.match(/\\right(?![a-zA-Z])/g) || []).length;
-
-      if (leftCount > rightCount) {
-        const diff = leftCount - rightCount;
-        for (let k = 0; k < diff; k++) {
-          repairedInner = repairedInner.trimEnd() + ' \\right.';
-        }
-      } else if (rightCount > leftCount) {
-        // If there's an extra trailing \right. or empty \right, strip it first
-        while (repairedInner.endsWith('\\right.') && (repairedInner.match(/\\right(?![a-zA-Z])/g) || []).length > (repairedInner.match(/\\left(?![a-zA-Z])/g) || []).length) {
-          repairedInner = repairedInner.slice(0, -7).trimEnd();
-        }
-        const updatedLeft = (repairedInner.match(/\\left(?![a-zA-Z])/g) || []).length;
-        const updatedRight = (repairedInner.match(/\\right(?![a-zA-Z])/g) || []).length;
-        if (updatedRight > updatedLeft) {
-          const diff = updatedRight - updatedLeft;
-          for (let k = 0; k < diff; k++) {
-            repairedInner = '\\left. ' + repairedInner;
-          }
-        }
-      }
 
       return `$${repairedInner}$`;
     });

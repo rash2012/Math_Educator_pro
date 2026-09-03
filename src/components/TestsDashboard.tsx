@@ -19,7 +19,8 @@ import {
   LockOpen,
   CheckCircle2,
   ClipboardCheck,
-  Zap
+  Zap,
+  Sparkles
 } from 'lucide-react';
 import { TestView } from './TestView';
 import { ConfirmDialog } from './ui/ConfirmDialog';
@@ -28,12 +29,17 @@ import { reviewTest } from '../services/gemini';
 import Markdown from 'react-markdown';
 
 import { DocumentMetadataModal } from './DocumentMetadataModal';
+import { CloudTestsCleanupModal } from './CloudTestsCleanupModal';
 import { DEFAULT_SERIES_NAME, DEFAULT_TEACHER_NAME, DEFAULT_TEACHER_ROLE } from '../constants/academicData';
 import { UnifiedPageHeader } from './common/UnifiedPageHeader';
+import { SyncStatusBadge } from './SyncStatusBadge';
+import { SyncControlButton } from './SyncControlButton';
+import { computeTestHash, computeContentHash, getSupabaseClient, saveSyncMapping, cleanupAllDuplicateTests, type SyncStatus } from '../services/supabaseSync';
 
 export const TestsDashboard: React.FC = () => {
   const [tests, setTests] = useState<Test[]>([]);
   const [categories, setCategories] = useState<TestCategory[]>([]);
+  const [syncStatuses, setSyncStatuses] = useState<Record<number, SyncStatus>>({});
   const [loading, setLoading] = useState(true);
   const [selectedTestId, setSelectedTestId] = useState<number | null>(null);
   const [activeCategoryId, setActiveCategoryId] = useState<number | null>(null);
@@ -50,6 +56,7 @@ export const TestsDashboard: React.FC = () => {
   const [gradeFilter, setGradeFilter] = useState('');
   const [subjectFilter, setSubjectFilter] = useState('');
   const [difficultyFilter, setDifficultyFilter] = useState('');
+  const [syncFilter, setSyncFilter] = useState<'all' | 'un_synced'>('all');
 
   // Edit Modal State
   const [editingTest, setEditingTest] = useState<Test | null>(null);
@@ -58,9 +65,33 @@ export const TestsDashboard: React.FC = () => {
   const [reviewingTestId, setReviewingTestId] = useState<number | null>(null);
   const [activeReport, setActiveReport] = useState<{ title: string; report: string } | null>(null);
 
+  // Cloud Deduplication & Cleanup State
+  const [showCleanupModal, setShowCleanupModal] = useState(false);
+  const [isCleaningDuplicates, setIsCleaningDuplicates] = useState(false);
+
   useEffect(() => {
     loadData();
   }, []);
+
+  const handleCleanupDuplicates = async () => {
+    if (!window.confirm('هل ترغب بفحص وتنظيف السجلات المكررة للاختبارات في جدول NewTests سحابياً؟\nسيتم الإبقاء على سجل وحيد معتمد لكل اختبار وحذف النسخ الزائدة بأمان.')) {
+      return;
+    }
+    setIsCleaningDuplicates(true);
+    try {
+      const res = await cleanupAllDuplicateTests();
+      if (res.success) {
+        alert(res.message + (res.details.length > 0 ? '\n\nالتفاصيل:\n' + res.details.join('\n') : ''));
+        await loadData();
+      } else {
+        alert('تعذر التنظيف: ' + res.message);
+      }
+    } catch (err: any) {
+      alert('حدث خطأ أثناء تنظيف السجلات: ' + (err.message || err));
+    } finally {
+      setIsCleaningDuplicates(false);
+    }
+  };
 
   const openEditModal = (test: Test, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -98,13 +129,72 @@ export const TestsDashboard: React.FC = () => {
 
   const loadData = async () => {
     setLoading(true);
-    const [allTests, allCats] = await Promise.all([
-      db.tests.reverse().sortBy('createdAt'),
-      db.testCategories.toArray()
-    ]);
-    setTests(allTests);
-    setCategories(allCats);
-    setLoading(false);
+    try {
+      const [allTests, allCats, mappings] = await Promise.all([
+        db.tests.reverse().sortBy('createdAt'),
+        db.testCategories.toArray(),
+        db.syncMappings.where('localTable').equals('tests').toArray()
+      ]);
+      setTests(allTests);
+      setCategories(allCats);
+
+      const mappingMap = new Map(mappings.map(m => [String(m.localId), m]));
+
+      // فحص الاختبارات السحابية لاستكشاف البطاقات المتزامنة سابقاً تلقائياً
+      const remoteTestsMap = new Map<string, { id: string; is_published: boolean }>();
+      const supabase = getSupabaseClient();
+      if (supabase) {
+        try {
+          const { data: rTests } = await supabase
+            .from('NewTests')
+            .select('id, title, is_published');
+          if (rTests) {
+            for (const rt of rTests) {
+              if (rt.title) {
+                remoteTestsMap.set(rt.title.trim(), rt);
+              }
+            }
+          }
+        } catch {
+          // ignore network error
+        }
+      }
+
+      const statusMap: Record<number, SyncStatus> = {};
+      for (const test of allTests) {
+        if (!test.id) continue;
+        let m = mappingMap.get(String(test.id));
+        const testTitle = (test.testData?.title || test.title || '').trim();
+        const remoteMatch = remoteTestsMap.get(testTitle);
+
+        if (!m || !m.remoteId) {
+          if (remoteMatch) {
+            const currentHash = computeTestHash(test);
+            await saveSyncMapping('tests', test.id, remoteMatch.id, currentHash, remoteMatch.is_published !== false);
+            statusMap[test.id] = remoteMatch.is_published === false ? 'draft_cloud' : 'synced';
+          } else if ((test as any).remoteId) {
+            statusMap[test.id] = 'synced';
+          } else {
+            statusMap[test.id] = 'not_synced';
+          }
+        } else {
+          const currentHash = computeTestHash(test);
+          const legacyHash = computeContentHash(test);
+          if (m.contentHash !== currentHash && m.contentHash !== legacyHash) {
+            statusMap[test.id] = 'modified';
+          } else if (m.isPublished === false) {
+            statusMap[test.id] = 'draft_cloud';
+          } else {
+            statusMap[test.id] = 'synced';
+          }
+        }
+      }
+      setSyncStatuses(statusMap);
+    } catch (err) {
+      console.error('Error loading tests data:', err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const createCategory = async () => {
@@ -290,10 +380,17 @@ export const TestsDashboard: React.FC = () => {
     }
   };
 
+  const unSyncedCount = tests.filter(
+    test => !test.id || !syncStatuses[test.id] || syncStatuses[test.id] !== 'synced'
+  ).length;
+
   const filteredTests = tests.filter(test => {
     const matchesCategory = activeCategoryId === null ? !test.categoryId : test.categoryId === activeCategoryId;
+    const isUnsynced = !test.id || !syncStatuses[test.id] || syncStatuses[test.id] !== 'synced';
+    const matchesSync = syncFilter === 'all' || isUnsynced;
     return (
       matchesCategory &&
+      matchesSync &&
       (gradeFilter === '' || test.grade.includes(gradeFilter)) &&
       (subjectFilter === '' || test.subject.includes(subjectFilter)) &&
       (difficultyFilter === '' || test.difficulty === difficultyFilter)
@@ -360,6 +457,14 @@ export const TestsDashboard: React.FC = () => {
               ref={fileInputRef}
               onChange={handleImport}
             />
+            <button
+              onClick={() => setShowCleanupModal(true)}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 rounded-xl text-xs font-black transition-all shadow-xs active:scale-95 cursor-pointer"
+              title="فحص وإدارة السجلات السحابية في NewTests وحذف النسخ المكررة مع أقسامها وأسئلتها"
+            >
+              <Sparkles size={14} className="text-amber-700" />
+              <span>إدارة وتنظيف السجلات السحابية</span>
+            </button>
             <button
               onClick={() => fileInputRef.current?.click()}
               className="flex items-center gap-1.5 px-4 py-2 bg-white border border-slate-300 rounded-xl text-slate-700 text-xs font-black hover:bg-slate-50 transition-all shadow-xs active:scale-95 cursor-pointer"
@@ -466,7 +571,40 @@ export const TestsDashboard: React.FC = () => {
         {/* Main Content */}
         <div className="flex-grow">
           <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200 mb-6">
-            <div className="flex flex-col md:flex-row gap-4">
+            <div className="flex flex-col lg:flex-row gap-4 items-stretch lg:items-center">
+              <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setSyncFilter('all')}
+                  className={`px-3.5 py-2 rounded-lg text-xs font-black transition-all cursor-pointer ${
+                    syncFilter === 'all'
+                      ? 'bg-white text-indigo-700 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  عرض: الكل ({tests.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSyncFilter('un_synced')}
+                  className={`px-3.5 py-2 rounded-lg text-xs font-black transition-all cursor-pointer flex items-center gap-1.5 ${
+                    syncFilter === 'un_synced'
+                      ? 'bg-amber-500 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                  title="عرض الاختبارات غير المزامنة أو المعدلة محلياً فقط"
+                >
+                  <span>غير مُزامَن فقط</span>
+                  {unSyncedCount > 0 && (
+                    <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-black ${
+                      syncFilter === 'un_synced' ? 'bg-white text-amber-700' : 'bg-amber-100 text-amber-800'
+                    }`}>
+                      {unSyncedCount}
+                    </span>
+                  )}
+                </button>
+              </div>
+
               <input
                 type="text"
                 placeholder="تصفية حسب الصف..."
@@ -522,17 +660,33 @@ export const TestsDashboard: React.FC = () => {
                 >
                   <div className="flex justify-between items-start mb-4 relative z-10">
                     <div className="flex flex-col gap-1 flex-grow">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                            {test.isReviewed && (
                              <div className="flex items-center gap-1 text-[10px] bg-emerald-600 text-white px-2 py-0.5 rounded-full font-black">
                                <CheckCircle2 size={10} />
                                جاهز
                              </div>
                            )}
+                           <SyncStatusBadge
+                             table="tests"
+                             id={test.id!}
+                             data={test}
+                             compact={true}
+                             onSyncComplete={loadData}
+                           />
                            <h3 className="text-xl font-black text-gray-900 line-clamp-2 leading-tight">{test.title}</h3>
                         </div>
                     </div>
-                    <div className="flex gap-2 shrink-0 mr-4">
+                    <div className="flex gap-2 shrink-0 mr-4 items-center">
+                        <div onClick={(e) => e.stopPropagation()}>
+                          <SyncControlButton
+                            table="tests"
+                            id={test.id!}
+                            data={test}
+                            variant="compact"
+                            onSyncComplete={loadData}
+                          />
+                        </div>
                         <button 
                           onClick={(e) => toggleReviewStatus(test, e)}
                           className={`p-2.5 rounded-xl transition-all shadow-sm ${
@@ -703,6 +857,13 @@ export const TestsDashboard: React.FC = () => {
           </div>
         )}
       </AnimatePresence>
+
+      {/* نافذة إدارة وتنظيف الاختبارات السحابية ومكافحة التكرار */}
+      <CloudTestsCleanupModal
+        isOpen={showCleanupModal}
+        onClose={() => setShowCleanupModal(false)}
+        onRefreshParent={loadData}
+      />
     </div>
   );
 };

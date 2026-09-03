@@ -21,6 +21,9 @@ export interface ClassifiedStation {
 
 export interface ClassifiedExercise {
   id: string;
+  sectionId?: number | string;
+  kind?: 'practice' | 'practical';
+  orderIndex?: number;
   title: string;
   questionText: string;
   solutionText?: string;
@@ -199,10 +202,16 @@ export async function loadUnitExerciseFamilies(docId: number): Promise<Classifie
   }
 
   const sections = await db.lessonSections.where('docId').equals(docId).toArray();
-  const allPracticeExercises: PracticeExercise[] = [];
+  const allPracticeExercises: Array<PracticeExercise & { sectionId?: number | string; orderIndex?: number }> = [];
   sections.forEach(s => {
     if (s.practiceExercises) {
-      allPracticeExercises.push(...s.practiceExercises);
+      s.practiceExercises.forEach((pe, idx) => {
+        allPracticeExercises.push({
+          ...pe,
+          sectionId: s.id,
+          orderIndex: idx
+        });
+      });
     }
   });
 
@@ -258,6 +267,9 @@ export async function loadUnitExerciseFamilies(docId: number): Promise<Classifie
 
       classifiedExercises.push({
         id: pe.id,
+        sectionId: pe.sectionId,
+        kind: 'practice',
+        orderIndex: pe.orderIndex ?? 0,
         title: pe.title,
         questionText: pe.questionText,
         solutionText: pe.solutionText,

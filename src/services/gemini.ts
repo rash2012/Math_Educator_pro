@@ -3,6 +3,8 @@ import { db, type Document, type Exercise, type LessonSection } from "../db";
 import { AI_BOOKLET_NOTEBOOK_PROMPT } from "./aiBookletPrompts";
 import { convertPdfDataToImages } from "./pdf";
 import { globalOrchestrator } from "./multiAgent";
+import { generateSvgFromConceptMap, generateSvgFromTree } from "../utils/mindmapSvgGenerator";
+import { normalizeConceptMapData, CATEGORY_CONFIG } from "../utils/mindmapParser";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -197,12 +199,19 @@ function parseLooseJson(text: string): any {
 export function cleanJson(text: string): any {
   if (!text || typeof text !== 'string') return [];
 
+  // Protect LaTeX commands that start with valid JSON escape characters (r, n, t, b, f)
+  // This prevents JSON.parse from silently evaluating "\right" as a carriage return + "ight".
+  let safeText = text.replace(
+    /(?<!\\)\\(right|left|rho|rangle|rfloor|rceil|nabla|natural|ne|neq|ni|normalsize|not|notin|nu|tan|tanh|tau|text|theta|tilde|times|to|top|triangle|begin|beta|big|Big|Bigg|binom|bmod|bot|bullet|flat|forall|frac|frown)\b/g,
+    '\\\\$1'
+  );
+
   try {
     // 1. Try direct parse
-    return JSON.parse(text);
+    return JSON.parse(safeText);
   } catch (e) {
     // 2. Try to extract JSON from markdown code blocks
-    let cleaned = text;
+    let cleaned = safeText;
     const match = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
     if (match) {
       cleaned = match[1].trim();
@@ -3814,67 +3823,133 @@ export async function generateUnitMindMapAI(
   doc: Document,
   sections: LessonSection[]
 ): Promise<{ title: string; svgCode: string; markdownSchema?: string; treeData?: any }> {
-  // Send more content to avoid missing details
+  // Extract all sections, practice exercises, and rules
   const sectionsSummary = sections.map((s, idx) => {
     let extra = '';
     if (s.practiceExercises && s.practiceExercises.length > 0) {
-      extra += '\nتمارين: ' + s.practiceExercises.map(e => e.questionText || e.title).join(' | ');
+      extra += '\nتمارين وتطبيقات: ' + s.practiceExercises.map(e => e.questionText || e.title).join(' | ');
     }
-    return `[فقرة ${idx + 1}: ${s.title}]\nالمحتوى: ${s.content ? s.content.substring(0, 1500) : ''}... ${extra}`;
+    return `[الفقرة ${idx + 1}: ${s.title}]\nالمحتوى المعرفي: ${s.content ? s.content.substring(0, 1800) : ''}\n${extra}`;
   }).join('\n\n');
 
-  const prompt = `# نظام هندسة الخرائط الذهنية البصرية للدروس التعليمية (Visual Mindmap Engine)
+  const prompt = `# 🧭 نظام هندسة الخرائط الذهنية والمفاهيمية الذكية (Sleek Minimalist Mind Map Engine)
 
-## الهوية والدور:
-أنت مهندس تصميم بصري أول وخبير تعليمي متخصص في المناهج العلمية.
-مهمتك هي قراءة محتوى الدرس وتفكيكه ذهنياً، ثم إعادة بنائه على شكل خريطة ذهنية هيكلية (Tree Data).
+## 🎯 الهوية والدور:
+أنت خبير تصميم خرائط ذهنية ومعرفية رياضية فائقة الجمال والوضوح (Minimalist Visual Mindmap Designer).
+مهمتك هي قراءة مفاهيم الوحدة وتحويلها إلى **خريطة ذهنية بصرية أنيقة، مركزة، وموجزة جداً** بدون حشو أو نصوص طويلة أو شروح مفرطة (كما في الخرائط الذهنية الحديثة المتناسقة).
 
-- الوحدة: ${doc.unit || doc.title}
-- الصف: ${doc.grade}
+- **الوحدة الدراسية:** ${doc.unit || doc.title}
+- **المادة والمرحلة:** ${doc.subject || 'الرياضيات'} - ${doc.grade || 'الثالث الثانوي العلمي'}
 
-الدروس والمفاهيم الرئيسية في الوحدة:
+محتوى الوحدة والمفاهيم:
 ${sectionsSummary}
 
 ---
 
-## 🎨 بناء العقد وأنواعها:
-يجب أن تصنف كل عقدة إلى أحد الأنواع التالية (لغرض التلوين التلقائي لاحقاً):
-- \`root\`: العقدة المركزية (جوهر الدرس).
-- \`concept\`: للمفاهيم والتعاريف الأساسية.
-- \`theorem\`: للمبرهنات والقواعد الجبرية الثابتة.
-- \`algorithm\`: لخوارزميات وخطوات الحل.
-- \`warning\`: للفخاخ الامتحانية والملاحظات الهامة.
+## 💎 القواعد البصرية والهندسية الصارمة (Strict Rules):
 
-## 📐 تنسيق الإخراج المطلوب:
-قم بإنشاء الخريطة الذهنية على شكل JSON فقط:
-1. **title**: عنوان الخريطة.
-2. **markdownSchema**: التوصيف الهيكلي النصي بصيغة Markdown.
-3. **tree**: الكائن الجذري للخريطة (Root Node) والذي يحتوي على تفريعاته \`children\`.
-ملاحظة: يمكنك استخدام الـ LaTeX في الـ \`label\`.
+1. **الإيجاز التام والتركيز (No Long Text / High Conciseness):**
+   - **يُمنع منعاً باتاً كتابة فقرات أو شروح طويلة** في العقد.
+   - عنوان العقدة (\`label\`) يجب ألا يتجاوز **3 إلى 5 كلمات** كحد أقصى (مثل: "المتتالية الحسابية", "دراسة اطراد المتتالية", "خطوة التحقق $E(n_0)$", "نهاية تابع مركب").
+   - اترك حقل \`description\` فارغاً أو في حدود جملة واحدة فائقة الاختصار (أقل من 8 كلمات) لتفادي أي تكدس بصري.
 
-أعد الرد على شكل JSON كالتالي حصراً:
+2. **التنظيم الهيكلي المتوازن (Hierarchical Branching):**
+   - **العقدة المركزية (\`root\`):** عنوان الوحدة الرئيسي والمفهوم الجامع (مثل: "المتتاليات والإثبات بالتدريج").
+   - **الفروع الرئيسية (2 إلى 4 فروع أساسية):** المحاور الكبرى للوحدة (مثل: "الإثبات بالتدريج", "دراسة اطراد المتتالية", "المتتاليات التدريجية").
+   - **العقد الفرعية / التطبيقية (2 إلى 3 تحت كل فرع):** الحالات الخاصة، الخطوات الدقيقة، أو القوانين الحاكمة.
+
+3. **الرموز والصيغ الرياضية (Inline LaTeX):**
+   - ضع الصيغة الرياضية الأساسية مباشرة في حقل \`latex\` أو مدمجة باختصار شديد داخل \`label\` بين علامتي \`$ ... $\` (مثل: \`$u_{n+1} = u_n + r$\` أو \`$u_{n+1} - u_n > 0$\` أو \`$\\\\lim_{x \\\\to a} f(x)$\`).
+   - لا تستخدم \\left أو \\right في كود LaTeX.
+
+4. **تسميات الروابط الدلالية (Short Edge Labels):**
+   - كل رابط (\`from\` ➔ \`to\`) يجب أن يحمل تسمية قصيرة ومحددة (كلمة أو كلمتان فقط) مثل:
+     - "تتضمن دراسة" | "تستخدم لإثبات" | "تعتمد على" | "حالات خاصة" | "فحص" | "تطبيق" | "خطوة 1" | "خطوة 2".
+
+---
+
+## 📤 هيكل الرد المطلوب (Strict Minimal JSON Schema):
+
 {
-  "title": "عنوان الخريطة الذهنية",
-  "markdownSchema": "نص التوصيف الهيكلي بصيغة Markdown هنا",
-  "tree": {
-    "id": "root",
-    "label": "العنوان الرئيسي",
-    "type": "root",
-    "children": [
-      {
-        "id": "c1",
-        "label": "مفهوم 1",
-        "type": "concept",
-        "children": []
-      },
-      {
-        "id": "t1",
-        "label": "قاعدة هامة",
-        "type": "theorem",
-        "children": []
-      }
-    ]
-  }
+  "title": "${doc.unit || doc.title}",
+  "unit": "${doc.unit || doc.title}",
+  "nodes": [
+    {
+      "id": "root",
+      "label": "العنوان الرئيسي للوحدة",
+      "category": "root",
+      "latex": null
+    },
+    {
+      "id": "branch_1",
+      "label": "الفرع الرئيسي الأول",
+      "category": "concept",
+      "latex": null
+    },
+    {
+      "id": "sub_1_1",
+      "label": "مفهوم أو خطوة فرعية",
+      "category": "procedure",
+      "latex": "$E(n_0)$"
+    },
+    {
+      "id": "sub_1_2",
+      "label": "خطوة البرهان",
+      "category": "procedure",
+      "latex": "$E(n) \\\\Rightarrow E(n+1)$"
+    },
+    {
+      "id": "branch_2",
+      "label": "الفرع الرئيسي الثاني",
+      "category": "concept",
+      "latex": null
+    },
+    {
+      "id": "sub_2_1",
+      "label": "المتتالية الحسابية",
+      "category": "theorem",
+      "latex": "$u_{n+1} = u_n + r$"
+    },
+    {
+      "id": "sub_2_2",
+      "label": "المتتالية الهندسية",
+      "category": "theorem",
+      "latex": "$u_{n+1} = q \\\\cdot u_n$"
+    }
+  ],
+  "edges": [
+    {
+      "from": "root",
+      "to": "branch_1",
+      "label": "تستخدم لإثبات"
+    },
+    {
+      "from": "branch_1",
+      "to": "sub_1_1",
+      "label": "خطوة"
+    },
+    {
+      "from": "branch_1",
+      "to": "sub_1_2",
+      "label": "خطوة"
+    },
+    {
+      "from": "root",
+      "to": "branch_2",
+      "label": "تتضمن دراسة"
+    },
+    {
+      "from": "branch_2",
+      "to": "sub_2_1",
+      "label": "حالات خاصة"
+    },
+    {
+      "from": "branch_2",
+      "to": "sub_2_2",
+      "label": "حالات خاصة"
+    }
+  ],
+  "summary": "خلاصة مكثفة وموجزة للترابط البصري للوحدة."
 }
 `;
 
@@ -3882,22 +3957,40 @@ ${sectionsSummary}
     const response = await generateWithFallback(MODELS_FALLBACK, {
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: {
-        temperature: 0.5,
+        temperature: 0.4,
         responseMimeType: 'application/json',
       }
     });
 
-    const responseText = response.text || "{}";
-    const parsed = JSON.parse(responseText);
+    const parsed = cleanJson(response.text || "{}");
+    const mapTitle = parsed.title || `خريطة مفاهيم: ${doc.unit || doc.title}`;
+    
+    // Normalize data through concept map parser
+    const normalizedConceptMap = normalizeConceptMapData(parsed, mapTitle);
+    const svgCode = generateSvgFromConceptMap(normalizedConceptMap, mapTitle);
+
+    // Markdown representation for export & schema inspection
+    let markdownSchema = parsed.markdownSchema || '';
+    if (!markdownSchema && normalizedConceptMap.nodes.length > 0) {
+      markdownSchema = `# 🧭 ${mapTitle}\n\n## 📝 الخلاصة التركيبية:\n${normalizedConceptMap.summary || 'خريطة المفاهيم والعلاقات الهيكلية للوحدة.'}\n\n## 📊 العقد والمفاهيم الرئيسية:\n` +
+        normalizedConceptMap.nodes.map(n => `- **[${CATEGORY_CONFIG[n.category as keyof typeof CATEGORY_CONFIG]?.label || n.category}]** ${n.label}${n.description ? `: ${n.description}` : ''}${n.latex ? ` (${n.latex})` : ''}`).join('\n') +
+        `\n\n## 🔗 شبكة الروابط والعلاقات:\n` +
+        normalizedConceptMap.edges.map(e => {
+          const src = normalizedConceptMap.nodes.find(n => n.id === e.from)?.label || e.from;
+          const tgt = normalizedConceptMap.nodes.find(n => n.id === e.to)?.label || e.to;
+          return `- **${src}** ──( ${e.label || 'يرتبط بـ'} )──➔ **${tgt}**`;
+        }).join('\n');
+    }
+
     return {
-      title: parsed.title || `خريطة ذهنية: ${doc.unit || doc.title}`,
-      svgCode: '', // no longer generating SVG directly
-      markdownSchema: parsed.markdownSchema || '',
-      treeData: parsed.tree || null
+      title: mapTitle,
+      svgCode: svgCode,
+      markdownSchema: markdownSchema,
+      treeData: normalizedConceptMap
     };
   } catch (error) {
-    console.error("Error generating unit mind map:", error);
-    throw new Error("حدث خطأ أثناء توليد الخريطة الذهنية.");
+    console.error("Error generating unit concept map:", error);
+    throw new Error("حدث خطأ أثناء توليد الخريطة المفاهيمية بالذكاء الاصطناعي.");
   }
 }
 

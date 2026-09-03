@@ -37,6 +37,8 @@ import {
 } from '../db';
 import { generateUnitQuizAI } from '../services/gemini';
 import { MathRenderer } from './MathRenderer';
+import { SyncControlButton } from './SyncControlButton';
+import { SyncStatusBadge } from './SyncStatusBadge';
 
 interface UnitQuizSectionProps {
   document: Document;
@@ -414,7 +416,15 @@ export const UnitQuizSection: React.FC<UnitQuizSectionProps> = ({
 
               {/* Admin Additional Buttons */}
               {isAdmin && unitQuiz && (
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <SyncControlButton
+                    table="unitQuizzes"
+                    id={unitQuiz.id!}
+                    data={unitQuiz}
+                    showDraftOption={true}
+                    buttonText="نشر الاختبار"
+                  />
+
                   <button
                     type="button"
                     onClick={handleOpenEditModal}

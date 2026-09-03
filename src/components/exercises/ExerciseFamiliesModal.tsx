@@ -19,6 +19,7 @@ import {
   Plus
 } from 'lucide-react';
 import { MathRenderer } from '../MathRenderer';
+import { SyncControlButton } from '../SyncControlButton';
 import { ExerciseFamilyEditModal } from './ExerciseFamilyEditModal';
 import {
   classifyAndGenerateExerciseFamiliesAI,
@@ -240,7 +241,7 @@ export const ExerciseFamiliesModal: React.FC<ExerciseFamiliesModalProps> = ({
   const handleGenerateStationChoices = async (
     exId: string,
     stationOrder: 1 | 2 | 3 | 4,
-    mode: 'mcq' | 'true_false' = 'mcq'
+    mode: 'mcq' | 'true_false' | 'mixed' = 'mixed'
   ) => {
     const fam = families[activeTabIdx];
     if (!fam) return;
@@ -308,13 +309,14 @@ export const ExerciseFamiliesModal: React.FC<ExerciseFamiliesModalProps> = ({
   };
 
   // 5. Generate all stations choices for current family
-  const handleGenerateAllStationsChoicesForFamily = async (mode: 'mcq' | 'true_false' = 'mcq') => {
+  const handleGenerateAllStationsChoicesForFamily = async (mode: 'mcq' | 'true_false' | 'mixed' = 'mixed') => {
     const fam = families[activeTabIdx];
     if (!fam) return;
 
+    const modeLabel = mode === 'true_false' ? 'صح/خطأ' : mode === 'mcq' ? 'خيارات متعددة' : 'مختلط حسب سياق التمرين (صح/خطأ أو 4 خيارات)';
     setLoading(true);
     setProgressPct(10);
-    setProgressMsg(`جاري توليد الإجابات المقترحة لكافة محطات عائلة: "${fam.familyName}" (${mode === 'true_false' ? 'صح/خطأ' : 'خيارات متعددة'})...`);
+    setProgressMsg(`جاري توليد الإجابات المقترحة والموجزة لكافة محطات عائلة: "${fam.familyName}" (${modeLabel})...`);
 
     try {
       const updated = await generateAllStationsChoicesForFamilyAI(
@@ -339,7 +341,7 @@ export const ExerciseFamiliesModal: React.FC<ExerciseFamiliesModalProps> = ({
   };
 
   // 6. Handle Save from Manual Edit Modal
-  const handleSaveManualEdit = (
+  const handleSaveManualEdit = async (
     updatedFamily: ClassifiedFamilyData,
     reallocations?: { exerciseId: string; targetFamilyIndex: number }[]
   ) => {
@@ -366,9 +368,20 @@ export const ExerciseFamiliesModal: React.FC<ExerciseFamiliesModalProps> = ({
       }
     }
 
-    setFamilies(nextFamilies);
-    setEditingFamilyIdx(null);
-    setSaveSuccessMsg('تم حفظ التعديلات اليدوية بنجاح! اضغط "حفظ هذه العائلة" لتثبيتها في قاعدة البيانات.');
+    try {
+      const savedId = await saveExerciseFamilyAtomic(docId, updatedFamily);
+      nextFamilies[editingFamilyIdx].id = savedId;
+      nextFamilies[editingFamilyIdx].saved = true;
+      nextFamilies[editingFamilyIdx].hasManualEdits = true;
+      setFamilies(nextFamilies);
+      setEditingFamilyIdx(null);
+      setSaveSuccessMsg('تم حفظ التعديلات اليدوية بنجاح وتحديث قاعدة البيانات المحلية! 💾');
+    } catch (err: any) {
+      console.error('Error saving manual edits atomic:', err);
+      setFamilies(nextFamilies);
+      setEditingFamilyIdx(null);
+      setSaveSuccessMsg('تم تطبيق التعديلات بالذاكرة، يُرجى الضغط على "حفظ محلياً" لتثبيتها.');
+    }
     setTimeout(() => setSaveSuccessMsg(null), 4000);
   };
 
@@ -540,17 +553,25 @@ export const ExerciseFamiliesModal: React.FC<ExerciseFamiliesModalProps> = ({
                     <div className="flex items-center gap-1.5 bg-indigo-50/80 p-1.5 rounded-xl border border-indigo-100">
                       <span className="text-[11px] font-bold text-indigo-900 px-1">توليد خيارات لجميع المحطات:</span>
                       <button
+                        onClick={() => handleGenerateAllStationsChoicesForFamily('mixed')}
+                        disabled={loading}
+                        className="px-2.5 py-1 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white rounded-lg text-[11px] font-bold transition flex items-center gap-1 cursor-pointer shadow-2xs"
+                        title="توليد خيارات ذكية وموجزة مختلطة (صح/خطأ أو 4 خيارات) حسب سياق كل تمرين ومحطة"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" /> مختلط (ذكي وسياقي)
+                      </button>
+                      <button
                         onClick={() => handleGenerateAllStationsChoicesForFamily('mcq')}
                         disabled={loading}
-                        className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[11px] font-bold transition flex items-center gap-1 cursor-pointer"
+                        className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-[11px] font-bold transition flex items-center gap-1 cursor-pointer"
                         title="توليد 3-4 خيارات مع مشتتات لجميع محطات تمارين هذه العائلة"
                       >
-                        <Sparkles className="w-3.5 h-3.5" /> 3-4 خيارات
+                        <span>4 خيارات</span>
                       </button>
                       <button
                         onClick={() => handleGenerateAllStationsChoicesForFamily('true_false')}
                         disabled={loading}
-                        className="px-2.5 py-1 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-[11px] font-bold transition flex items-center gap-1 cursor-pointer"
+                        className="px-2.5 py-1 bg-violet-50 hover:bg-violet-100 text-violet-700 border border-violet-200 rounded-lg text-[11px] font-bold transition flex items-center gap-1 cursor-pointer"
                         title="توليد عبارات صح أو خطأ لجميع محطات تمارين هذه العائلة"
                       >
                         <CheckSquare className="w-3.5 h-3.5" /> صح / خطأ
@@ -719,15 +740,23 @@ export const ExerciseFamiliesModal: React.FC<ExerciseFamiliesModalProps> = ({
                                       </div>
 
                                       {/* On-demand generation buttons for this station */}
-                                      <div className="flex items-center gap-1.5">
+                                      <div className="flex items-center gap-1">
+                                        <button
+                                          onClick={() => handleGenerateStationChoices(ex.id, orderNum as 1|2|3|4, 'mixed')}
+                                          disabled={isGenerating || loading}
+                                          className="px-2 py-1 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer disabled:opacity-50 shadow-2xs"
+                                          title="توليد خيار ذكي وسياقي وموجز (مختلط)"
+                                        >
+                                          <Sparkles className="w-3 h-3 text-white" />
+                                          <span>{isGenerating ? 'جاري...' : 'مختلط'}</span>
+                                        </button>
                                         <button
                                           onClick={() => handleGenerateStationChoices(ex.id, orderNum as 1|2|3|4, 'mcq')}
                                           disabled={isGenerating || loading}
                                           className="px-2 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                                          title="توليد أو إعادة توليد 3-4 خيارات مقترحة"
+                                          title="توليد 4 خيارات مقترحة"
                                         >
-                                          <Sparkles className="w-3 h-3 text-indigo-600" />
-                                          <span>{isGenerating ? 'جاري التوليد...' : 'توليد 3-4 خيارات'}</span>
+                                          <span>4 خيارات</span>
                                         </button>
                                         <button
                                           onClick={() => handleGenerateStationChoices(ex.id, orderNum as 1|2|3|4, 'true_false')}
@@ -846,6 +875,17 @@ export const ExerciseFamiliesModal: React.FC<ExerciseFamiliesModalProps> = ({
                   >
                     <Check className="w-4 h-4" /> حفظ هذه العائلة والخيارات
                   </button>
+
+                  {/* 1.5. Sync with Cloud if Saved */}
+                  {activeFamily.saved && activeFamily.id && (
+                    <SyncControlButton
+                      table="exerciseFamilies"
+                      id={activeFamily.id}
+                      data={activeFamily}
+                      variant="compact"
+                      showDraftOption={true}
+                    />
+                  )}
 
                   {/* 2. Manual Edit */}
                   <button

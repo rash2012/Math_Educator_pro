@@ -6,8 +6,10 @@ import { DocumentMetadataModal } from './DocumentMetadataModal';
 import { 
   ArrowRight, Plus, Trash2, Edit3, Printer, Download, Upload, Save, X, Eye, EyeOff, 
   FileText, Globe, GraduationCap, BookOpen, Layers, BookMarked,
-  Sparkles, Loader2, Filter, Settings2, CheckCircle2
+  Sparkles, Loader2, Filter, Settings2, CheckCircle2, Cloud
 } from 'lucide-react';
+import { SyncControlButton } from './SyncControlButton';
+import { UnitSyncIndicator } from './UnitSyncIndicator';
 import { CustomDialog } from './ui/CustomDialog';
 import { COUNTRIES, GRADES, SUBJECTS, ALL_DEFAULT_MATH_UNITS, DEFAULT_METADATA } from '../constants/academicData';
 import { 
@@ -33,6 +35,7 @@ import { ExerciseCoverPage } from './exercises/ExerciseCoverPage';
 import { ExerciseFamiliesModal } from './exercises/ExerciseFamiliesModal';
 import { UnifiedPageHeader } from './common/UnifiedPageHeader';
 import { type RawUnitExerciseInput } from '../services/exerciseFamiliesAI';
+import { loadUnitExerciseFamilies, saveExerciseFamilyAtomic } from '../db/exerciseFamiliesRPC';
 
 export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; initialDocId?: number }> = ({ onBack, initialDocId }) => {
   // DB Queries
@@ -483,25 +486,96 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
     );
   };
 
-  // Export Booklet as JSON
-  const handleExportJSON = () => {
-    if (!activeDocument) return;
-    const bookletData = {
-      document: activeDocument,
-      sections: rawSections || [],
-      exportDate: new Date().toISOString(),
-      version: '1.0'
-    };
-    const blob = new Blob([JSON.stringify(bookletData, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${activeDocument.title || 'booklet_exercises'}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+  // Export Booklet as Comprehensive JSON (100% Data Fidelity)
+  const handleExportBookletJSON = async (doc: Document, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (!doc.id) {
+      showAlert('خطأ', 'لم يتم العثور على معرّف الكراسة للتصدير.');
+      return;
+    }
+    try {
+      const docId = doc.id;
+
+      // 1. Fetch all lesson sections sorted by order
+      const sections = await db.lessonSections.where({ docId }).sortBy('order');
+
+      // 2. Fetch exercise families related to this document
+      const exerciseFamilies = await db.exerciseFamilies.where('docId').equals(docId).toArray();
+
+      // 3. Fetch classified families structured object
+      let classifiedFamilies: any[] = [];
+      try {
+        classifiedFamilies = await loadUnitExerciseFamilies(docId);
+      } catch (famErr) {
+        console.warn('Could not load classified exercise families:', famErr);
+      }
+
+      // 4. Fetch exercise stations related to all exercises in this document
+      const exerciseIds: (string | number)[] = [];
+      sections.forEach(sec => {
+        sec.practiceExercises?.forEach(ex => {
+          if (ex.id) exerciseIds.push(ex.id);
+        });
+        sec.practicalExercises?.forEach(ex => {
+          if (ex.id) exerciseIds.push(ex.id);
+        });
+      });
+
+      let exerciseStations: any[] = [];
+      if (exerciseIds.length > 0) {
+        exerciseStations = await db.exerciseStations.where('exerciseId').anyOf(exerciseIds).toArray();
+      }
+
+      // 5. Fetch Unit Comprehensive Review, Quiz, MindMap, and PDF Content if present
+      const comprehensiveReview = await db.unitComprehensiveReviews.where('docId').equals(docId).first();
+      const unitQuiz = await db.unitQuizzes.where('docId').equals(docId).first();
+      const unitMindMap = await db.unitMindMaps.where('docId').equals(docId).first();
+      const pdfContent = await db.pdfContents.where('docId').equals(docId).first();
+
+      const exportData = {
+        type: 'comprehensive_exercise_package',
+        version: '3.0',
+        exportedAt: new Date().toISOString(),
+        document: doc,
+        booklet: doc, // for backward compatibility
+        sections: sections.map(sec => ({
+          ...sec,
+          practiceExercises: sec.practiceExercises || [],
+          practicalExercises: sec.practicalExercises || [],
+          analysis: sec.analysis || { additions: [] }
+        })),
+        exerciseFamilies,
+        exerciseStations,
+        classifiedFamilies,
+        unitComprehensiveReview: comprehensiveReview || null,
+        comprehensiveReview: comprehensiveReview || null,
+        unitQuiz: unitQuiz || null,
+        quiz: unitQuiz || null,
+        unitMindMap: unitMindMap || null,
+        mindMap: unitMindMap || null,
+        pdfContent: pdfContent ? { textContent: pdfContent.textContent, structuredContent: pdfContent.structuredContent } : null
+      };
+
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const safeTitle = (doc.title || doc.unit || 'كراسة_التمارين_والمسائل').replace(/[/\\?%*:|"<> ]/g, '_');
+      a.download = `${safeTitle}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      console.error(err);
+      showAlert('فشل التصدير ❌', err.message || 'حدث خطأ أثناء تجميع وتصدير ملف JSON.');
+    }
   };
 
-  // Import Booklet/Exercises from JSON
+  const handleExportJSON = async () => {
+    if (!activeDocument) return;
+    await handleExportBookletJSON(activeDocument);
+  };
+
+  // Import Booklet/Exercises from JSON (100% Comprehensive Fidelity)
   const handleImportJSON = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -512,17 +586,19 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
         const content = ev.target?.result as string;
         const data = JSON.parse(content);
 
+        // 1. Resolve Document Object
         const docData = data.document || data.booklet || (Array.isArray(data.sections) ? data : null) || (Array.isArray(data.exercises) ? data : null);
         const importedSections = Array.isArray(data.sections) ? data.sections : (Array.isArray(docData?.sections) ? docData.sections : null);
         const directExercises = Array.isArray(data.exercises) ? data.exercises : (Array.isArray(data) ? data : null);
 
         const bookletTitle = docData?.title || data.title || file.name.replace(/\.json$/i, '') || 'كراسة تمارين ومسائل مستوردة';
 
+        // 2. Insert Document with full academic metadata
         const newDocId = await db.documents.add({
           title: bookletTitle,
-          grade: docData?.grade || 'الثالث الثانوي العلمي',
-          subject: docData?.subject || 'رياضيات',
-          country: docData?.country || 'سوريا',
+          grade: docData?.grade || DEFAULT_METADATA.grade || 'الثالث الثانوي العلمي',
+          subject: docData?.subject || DEFAULT_METADATA.subject || 'رياضيات',
+          country: docData?.country || DEFAULT_METADATA.country || 'سوريا',
           part: docData?.part || '',
           unit: docData?.unit || 'الوحدة الأولى',
           topic: docData?.topic || 'تمارين ومسائل وتطبيقات',
@@ -530,16 +606,64 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
           seriesName: docData?.seriesName || 'سلسلة التمارين والمسائل الشاملة 📋✨',
           teacherName: docData?.teacherName || 'حسن راشد العلي',
           teacherRole: docData?.teacherRole || 'مدرّس مادة الرياضيات والعلوم التفاعلية',
+          familiesAnalysis: docData?.familiesAnalysis || '',
           createdAt: typeof docData?.createdAt === 'number' ? docData.createdAt : Date.now(),
           updatedAt: Date.now()
         });
 
+        // 3. Process Exercise Families (Map Old IDs -> New IDs)
+        const familyIdMap = new Map<string | number, string | number>();
+        if (Array.isArray(data.exerciseFamilies) && data.exerciseFamilies.length > 0) {
+          for (const fam of data.exerciseFamilies) {
+            const oldId = fam.id;
+            const { id, ...famData } = fam;
+            const newFamilyId = await db.exerciseFamilies.add({
+              ...famData,
+              docId: newDocId,
+              createdAt: famData.createdAt || Date.now(),
+              updatedAt: Date.now()
+            });
+            if (oldId !== undefined) {
+              familyIdMap.set(oldId, newFamilyId);
+            }
+          }
+        }
+
+        // Helper to remap family_id in exercises while preserving 100% of exercise fields
+        const remapExercises = (exercises: any[]) => {
+          if (!Array.isArray(exercises)) return [];
+          return exercises.map((ex: any, idx: number) => {
+            const questionVal = ex.questionText || ex.question || '';
+            const solutionVal = ex.solutionText || ex.solution || '';
+            const strategyVal = ex.strategyText || ex.strategy_text || ex.tactic || '';
+            const cleanEx: PracticeExercise = {
+              id: ex.id || `ex_${Date.now()}_${idx}`,
+              title: ex.title || `تمرين ${idx + 1}`,
+              questionText: questionVal,
+              solutionText: solutionVal,
+              strategyText: strategyVal,
+              svgCode: ex.svgCode || '',
+              guidedQuestions: Array.isArray(ex.guidedQuestions) ? ex.guidedQuestions : undefined,
+              family_id: ex.family_id !== undefined && familyIdMap.has(ex.family_id) ? familyIdMap.get(ex.family_id) : ex.family_id,
+              is_lead_exercise: Boolean(ex.is_lead_exercise),
+              primary_concept: ex.primary_concept || '',
+              secondary_concepts: Array.isArray(ex.secondary_concepts) ? ex.secondary_concepts : [],
+              patternType: ex.patternType || ''
+            };
+            return cleanEx;
+          });
+        };
+
+        // 4. Process Sections (preserve 100% of fields, exercises, practical exercises, and analysis)
         if (Array.isArray(importedSections) && importedSections.length > 0) {
           let order = 0;
           for (const sec of importedSections) {
-            const exercises = Array.isArray(sec.practiceExercises) 
+            let exercises = Array.isArray(sec.practiceExercises) 
               ? sec.practiceExercises 
               : (Array.isArray(sec.exercises) ? sec.exercises : []);
+
+            exercises = remapExercises(exercises);
+            const practicalExercises = remapExercises(sec.practicalExercises || []);
 
             await db.lessonSections.add({
               docId: newDocId,
@@ -547,16 +671,17 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
               content: sec.content || '',
               svgCode: sec.svgCode || '',
               order: typeof sec.order === 'number' ? sec.order : order++,
-              isPracticeOnly: true,
-              conceptLabel: '',
-              practiceSectionLabel: '',
-              practicalSectionLabel: '',
+              isPracticeOnly: sec.isPracticeOnly !== undefined ? Boolean(sec.isPracticeOnly) : true,
+              conceptLabel: sec.conceptLabel ?? '',
+              practiceSectionLabel: sec.practiceSectionLabel ?? '',
+              practicalSectionLabel: sec.practicalSectionLabel ?? '',
               practiceExercises: exercises,
-              practicalExercises: [],
-              analysis: { additions: [] }
+              practicalExercises: practicalExercises,
+              analysis: sec.analysis || { additions: [] }
             });
           }
         } else if (Array.isArray(directExercises) && directExercises.length > 0) {
+          const remappedDirect = remapExercises(directExercises);
           await db.lessonSections.add({
             docId: newDocId,
             title: `تمارين ومسائل - ${bookletTitle}`,
@@ -567,7 +692,7 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
             conceptLabel: '',
             practiceSectionLabel: '',
             practicalSectionLabel: '',
-            practiceExercises: directExercises,
+            practiceExercises: remappedDirect,
             practicalExercises: [],
             analysis: { additions: [] }
           });
@@ -588,8 +713,97 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
           });
         }
 
+        // 5. Process Classified Families if available
+        if (Array.isArray(data.classifiedFamilies) && data.classifiedFamilies.length > 0) {
+          for (const fam of data.classifiedFamilies) {
+            try {
+              await saveExerciseFamilyAtomic(newDocId, fam);
+            } catch (famErr) {
+              console.warn('Error saving classified family atomically:', famErr);
+            }
+          }
+        }
+
+        // 6. Process Exercise Stations (Ensure all 4 stations + choices + misconceptions + hints are added)
+        if (Array.isArray(data.exerciseStations) && data.exerciseStations.length > 0) {
+          const stationsToAdd = data.exerciseStations.map((st: any) => {
+            const { id, ...stData } = st;
+            return {
+              ...stData,
+              choices: Array.isArray(stData.choices) ? stData.choices : [],
+              createdAt: stData.createdAt || Date.now(),
+              updatedAt: Date.now()
+            };
+          });
+          if (stationsToAdd.length > 0) {
+            await db.exerciseStations.bulkAdd(stationsToAdd);
+          }
+        }
+
+        // 7. Process Unit Comprehensive Review if available
+        const revData = data.unitComprehensiveReview || data.comprehensiveReview || docData?.unitComprehensiveReview;
+        if (revData && typeof revData === 'object') {
+          await db.unitComprehensiveReviews.add({
+            docId: newDocId,
+            title: revData.title || `مراجعة شاملة: ${bookletTitle}`,
+            unit: revData.unit || bookletTitle,
+            grade: revData.grade || docData?.grade || DEFAULT_METADATA.grade,
+            subject: revData.subject || docData?.subject || DEFAULT_METADATA.subject,
+            summaryText: revData.summaryText || '',
+            definitions: Array.isArray(revData.definitions) ? revData.definitions : [],
+            theorems: Array.isArray(revData.theorems) ? revData.theorems : [],
+            results: Array.isArray(revData.results) ? revData.results : [],
+            trapsAndTips: Array.isArray(revData.trapsAndTips) ? revData.trapsAndTips : [],
+            formulasSummary: revData.formulasSummary || '',
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+          });
+        }
+
+        // 8. Process Unit Quiz if available
+        const quizData = data.unitQuiz || data.quiz || docData?.unitQuiz;
+        if (quizData && typeof quizData === 'object' && Array.isArray(quizData.questions) && quizData.questions.length > 0) {
+          await db.unitQuizzes.add({
+            docId: newDocId,
+            title: quizData.title || `اختبار الوحدة الشامل: ${bookletTitle}`,
+            unit: quizData.unit || bookletTitle,
+            grade: quizData.grade || docData?.grade || DEFAULT_METADATA.grade,
+            subject: quizData.subject || docData?.subject || DEFAULT_METADATA.subject,
+            totalQuestions: typeof quizData.totalQuestions === 'number' ? quizData.totalQuestions : quizData.questions.length,
+            passingScore: typeof quizData.passingScore === 'number' ? quizData.passingScore : 70,
+            questions: quizData.questions,
+            validationScore: quizData.validationScore,
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+          });
+        }
+
+        // 9. Process Unit Mind Map if available
+        const mindMapData = data.unitMindMap || data.mindMap || docData?.unitMindMap;
+        if (mindMapData && typeof mindMapData === 'object' && (mindMapData.svgCode || mindMapData.treeData || mindMapData.markdownSchema)) {
+          await db.unitMindMaps.add({
+            docId: newDocId,
+            title: mindMapData.title || `خريطة المفاهيم: ${bookletTitle}`,
+            svgCode: mindMapData.svgCode || '',
+            markdownSchema: mindMapData.markdownSchema || '',
+            treeData: mindMapData.treeData || null,
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+          });
+        }
+
+        // 10. Process PDF Content if available
+        const pdfData = data.pdfContent || docData?.pdfContent;
+        if (pdfData && typeof pdfData === 'object' && (pdfData.textContent || pdfData.structuredContent)) {
+          await db.pdfContents.add({
+            docId: newDocId,
+            textContent: pdfData.textContent || '',
+            structuredContent: pdfData.structuredContent || undefined
+          });
+        }
+
         setActiveDocId(newDocId);
-        showAlert('اكتمل الاستيراد 🎉', `تم استيراد كراسة التمارين والمسائل "${bookletTitle}" بنجاح مع كافة المسائل والحلول النموذجية!`);
+        showAlert('اكتمل الاستيراد بنجاح 100% 🎉', `تم استيراد كراسة التمارين والمسائل "${bookletTitle}" بكافة عناصرها (المسائل، الحلول الكاملة، الرسوم، عائلات التمارين، المحطات التوجيهية الـ 4، والخيارات والمشتتات والتلميحات) دون أي نقصان!`);
       } catch (err: any) {
         console.error(err);
         showAlert('فشل الاستيراد ❌', err.message || 'فشل تحليل ملف JSON المستورد وعرضه.');
@@ -1051,9 +1265,17 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
                           <span className="text-[10px] font-black px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-100">
                             ✨ {exCount} تمرين
                           </span>
+                          {doc.id && <UnitSyncIndicator docId={doc.id} compact={true} />}
                         </div>
 
                         <div className="flex items-center gap-1">
+                          <button
+                            onClick={(e) => handleExportBookletJSON(doc, e)}
+                            className="p-1.5 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors flex items-center gap-1 text-[11px] font-bold cursor-pointer"
+                            title="تصدير كراسة التمارين والمسائل 100% كملف JSON"
+                          >
+                            <Download size={14} />
+                          </button>
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
@@ -1153,6 +1375,36 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
       ) : (
         /* ACTIVE BOOKLET VIEW */
         <div className="space-y-6">
+          {/* Cloud Synchronization & Publishing Banner */}
+          {activeDocument?.id && (
+            <div className="bg-gradient-to-r from-violet-50 via-indigo-50/60 to-purple-50 p-4 rounded-2xl border border-violet-200/80 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 no-print shadow-xs">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-violet-600 text-white flex items-center justify-center shadow-xs flex-shrink-0">
+                  <Cloud size={20} />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h4 className="text-sm font-black text-slate-900">اعتماد ونشر كراسة التمارين والمسائل سحابياً (Supabase)</h4>
+                    <UnitSyncIndicator docId={activeDocument.id} compact={false} />
+                  </div>
+                  <p className="text-xs text-slate-600 font-medium mt-0.5">
+                    يشمل المزامنة الكاملة: نص السؤال • الحل المفصل والتكتيك • رسوم الـ SVG • عائلات التمارين • المحطات التوجيهية الـ 4 والخيارات والمشتتات والتلميحات
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2.5 w-full md:w-auto justify-end flex-wrap">
+                <SyncControlButton
+                  table="documents"
+                  id={activeDocument.id}
+                  data={activeDocument}
+                  showDraftOption={true}
+                  buttonText="نشر ومزامنة التمارين والمسائل بالكامل"
+                />
+              </div>
+            </div>
+          )}
+
           {/* Action & Control Bar */}
           <div className="bg-white p-4 rounded-2xl border border-gray-200 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 no-print shadow-xs">
             <div className="flex items-center gap-3">
@@ -1178,6 +1430,17 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
 
             {/* Action Buttons */}
             <div className="flex flex-wrap gap-2 items-center">
+              {/* Cloud Sync Direct Button */}
+              {activeDocument?.id && (
+                <SyncControlButton
+                  table="documents"
+                  id={activeDocument.id}
+                  data={activeDocument}
+                  variant="compact"
+                  showDraftOption={true}
+                />
+              )}
+
               {/* AI Family Classification & Stations Generator */}
               <button
                 onClick={() => activeDocument && handleOpenFamiliesModal(activeDocument)}

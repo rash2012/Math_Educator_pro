@@ -9,6 +9,8 @@ import { DocumentMetadataModal } from './DocumentMetadataModal';
 import { COUNTRIES, GRADES, SUBJECTS, PARTS, ALL_DEFAULT_MATH_UNITS } from '../constants/academicData';
 import { UnifiedPageHeader } from './common/UnifiedPageHeader';
 import { UnifiedFilterBar } from './common/UnifiedFilterBar';
+import { SyncStatusBadge } from './SyncStatusBadge';
+import { UnitSyncIndicator } from './UnitSyncIndicator';
 
 interface DashboardProps {
   onUploadClick: () => void;
@@ -426,6 +428,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onUploadClick, onViewDoc, 
                     }`}>
                       {doc.type === 'lesson' ? 'ملخص درس' : doc.type === 'pdf' ? 'مرجع (PDF)' : 'كراسة تمارين'}
                     </span>
+                    <UnitSyncIndicator docId={doc.id!} compact={true} />
                   </div>
 
                   <button

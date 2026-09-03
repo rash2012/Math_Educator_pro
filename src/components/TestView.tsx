@@ -1,10 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { db, type Test, type Document } from '../db';
-import { ArrowRight, Loader2, Printer, Edit, Save, RefreshCw, Sparkles, Image as ImageIcon, Lightbulb, Settings, Plus, X, Trash, Lock, LockOpen, CheckCircle2, ClipboardCheck, BrainCircuit, Scale, BarChart3, TrendingUp, Gauge, Clock, ShieldAlert, FileSpreadsheet, BookOpen, CheckCircle, AlertTriangle, Info, ListOrdered } from 'lucide-react';
+import { ArrowRight, Loader2, Printer, Edit, Save, RefreshCw, Sparkles, Image as ImageIcon, Lightbulb, Settings, Plus, X, Trash, Lock, LockOpen, CheckCircle2, ClipboardCheck, BrainCircuit, Scale, BarChart3, TrendingUp, Gauge, Clock, ShieldAlert, FileSpreadsheet, BookOpen, CheckCircle, AlertTriangle, Info, ListOrdered, Cloud } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { generateAlternativeQuestion, generateSvgForTestQuestion, generateSolutionForQuestion, reviewTest, applyFixesToTest, reviewSingleQuestion } from '../services/gemini';
 import Markdown from 'react-markdown';
 import { Checkbox } from './ui/Checkbox';
+import { SyncStatusBadge } from './SyncStatusBadge';
+import { SyncControlButton } from './SyncControlButton';
+import { syncSingleTest, getSyncMapping } from '../services/supabaseSync';
 
 import { MathRenderer } from './MathRenderer';
 import { SmartMathEditor } from './SmartMathEditor';
@@ -41,6 +44,8 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
   const [watermarkText, setWatermarkText] = useState('حسن راشد العلي');
   const [watermarkRepeats, setWatermarkRepeats] = useState<number>(3);
   const [printFont, setPrintFont] = useState<'default' | 'cairo' | 'amiri' | 'tajawal' | 'almarai' | 'al-mithaq'>('default');
+  const [syncStatusVersion, setSyncStatusVersion] = useState(0);
+  const [isSyncingSave, setIsSyncingSave] = useState(false);
 
   useEffect(() => {
     const loadTest = async () => {
@@ -49,7 +54,7 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
       setLoading(false);
     };
     loadTest();
-  }, [testId, showAnswers]);
+  }, [testId, showAnswers, syncStatusVersion]);
 
   const getRelatedPdfContent = async () => {
     if (!test) return "";
@@ -207,12 +212,34 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
     setHasUnsavedChanges(true);
   };
 
-  const handleSaveChanges = async () => {
+  const handleSaveChanges = async (andSync: boolean = false) => {
       if (!test) return;
       await db.tests.update(testId, { testData: test.testData, title: test.title, isReviewed: test.isReviewed });
       setHasUnsavedChanges(false);
       setIsEditing(false);
-      alert('تم حفظ التعديلات بنجاح');
+
+      // إذا كان الاختبار قد رُفع ومُوزامَن سابقاً أو طُلب مزامنته فوراً، نقوم بمزامنته سحابياً
+      const mapping = await getSyncMapping('tests', testId);
+      if (andSync || mapping?.remoteId || (test as any).remoteId) {
+        setIsSyncingSave(true);
+        try {
+          const syncRes = await syncSingleTest(testId, false);
+          if (syncRes.success) {
+            setSyncStatusVersion(v => v + 1);
+            alert(`تم حفظ التعديلات محلياً ومزامنتها سحابياً بنجاح!\n${syncRes.message}`);
+          } else {
+            setSyncStatusVersion(v => v + 1);
+            alert(`تم حفظ التعديلات محلياً، لكن تعذرت المزامنة السحابية: ${syncRes.message}`);
+          }
+        } catch (sErr: any) {
+          alert(`تم حفظ التعديلات محلياً، وحدث خطأ في المزامنة: ${sErr.message || sErr}`);
+        } finally {
+          setIsSyncingSave(false);
+        }
+      } else {
+        setSyncStatusVersion(v => v + 1);
+        alert('تم حفظ التعديلات محلياً بنجاح');
+      }
   };
 
   const toggleReviewStatus = async () => {
@@ -440,7 +467,7 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
                     }}
                   />
                 ) : (
-                  <div className="flex items-center gap-3">
+                  <div className="flex flex-wrap items-center gap-2.5">
                     <h1 className="text-3xl font-bold text-gray-900">{test.title}</h1>
                     {test.isReviewed && (
                       <div className="flex items-center gap-1 text-xs bg-emerald-600 text-white px-3 py-1 rounded-full font-black shadow-sm">
@@ -448,25 +475,45 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
                         جاهز للنشر
                       </div>
                     )}
+                    {test.id && (
+                      <SyncStatusBadge
+                        key={`sync-badge-${test.id}-${syncStatusVersion}`}
+                        table="tests"
+                        id={test.id}
+                        data={test}
+                        compact={false}
+                        onSyncComplete={() => setSyncStatusVersion(v => v + 1)}
+                      />
+                    )}
                   </div>
                 )}
               </div>
           </div>
-          <div className="flex gap-4">
+          <div className="flex flex-wrap items-center gap-3">
               {isEditing ? (
                   <>
                       <button
-                          onClick={handleSaveChanges}
+                          onClick={() => handleSaveChanges(true)}
+                          disabled={isSyncingSave}
+                          className="px-4 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-2 shadow-sm"
+                          title="حفظ التعديلات محلياً ومزامنتها مباشرة إلى السحابة"
+                      >
+                          {isSyncingSave ? <Loader2 size={18} className="animate-spin" /> : <Cloud size={18} />}
+                          حفظ ومزامنة سحابية
+                      </button>
+                      <button
+                          onClick={() => handleSaveChanges(false)}
+                          disabled={isSyncingSave}
                           className="px-4 py-2 bg-emerald-600 text-white font-bold rounded-lg hover:bg-emerald-700 transition-colors flex items-center gap-2"
                       >
-                          <Save size={20} />
-                          حفظ التعديلات
+                          <Save size={18} />
+                          حفظ محلي فقط
                       </button>
                       <button
                           onClick={() => setIsDesignerModalOpen(true)}
                           className="px-4 py-2 bg-indigo-100 text-indigo-700 font-bold rounded-lg hover:bg-indigo-200 transition-colors flex items-center gap-2 border border-indigo-200"
                       >
-                          <Sparkles size={20} />
+                          <Sparkles size={18} />
                           تصميم سؤال جديد
                       </button>
                       <button
@@ -477,13 +524,25 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
                       </button>
                   </>
               ) : (
-                  <button
-                      onClick={() => setIsEditing(true)}
-                      className="px-4 py-2 border-2 border-gray-200 text-gray-700 font-bold rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-2"
-                  >
-                      <Edit size={20} />
-                      تعديل الاختبار
-                  </button>
+                  <>
+                      {test.id && (
+                        <SyncControlButton
+                          key={`sync-btn-${test.id}-${syncStatusVersion}`}
+                          table="tests"
+                          id={test.id}
+                          data={test}
+                          variant="compact"
+                          onSyncComplete={() => setSyncStatusVersion(v => v + 1)}
+                        />
+                      )}
+                      <button
+                          onClick={() => setIsEditing(true)}
+                          className="px-4 py-2 border-2 border-gray-200 text-gray-700 font-bold rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-2"
+                      >
+                          <Edit size={18} />
+                          تعديل الاختبار
+                      </button>
+                  </>
               )}
               <button
                   onClick={toggleReviewStatus}

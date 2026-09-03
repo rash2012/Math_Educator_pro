@@ -266,6 +266,39 @@ body {
   @apply text-[14px] text-gray-800 leading-[1.8];
 }
 
+/* التوافق مع البطاقات الداكنة والخلفيات الملونة والخرائط الذهنية */
+.text-white .math-markdown-content,
+.math-markdown-content.text-white,
+.text-white .math-markdown-content p,
+.text-white .math-markdown-content span:not([class*="markdown-"]),
+.text-white .math-markdown-content .katex {
+  color: #ffffff !important;
+}
+
+.text-slate-100 .math-markdown-content,
+.math-markdown-content.text-slate-100,
+.text-slate-100 .math-markdown-content p,
+.text-slate-100 .math-markdown-content span:not([class*="markdown-"]),
+.text-slate-100 .math-markdown-content .katex {
+  color: #f1f5f9 !important;
+}
+
+.text-amber-300 .math-markdown-content,
+.math-markdown-content.text-amber-300,
+.text-amber-300 .math-markdown-content p,
+.text-amber-300 .math-markdown-content span:not([class*="markdown-"]),
+.text-amber-300 .math-markdown-content .katex {
+  color: #fcd34d !important;
+}
+
+.text-slate-950 .math-markdown-content,
+.math-markdown-content.text-slate-950,
+.text-slate-950 .math-markdown-content p,
+.text-slate-950 .math-markdown-content span:not([class*="markdown-"]),
+.text-slate-950 .math-markdown-content .katex {
+  color: #020617 !important;
+}
+
 /* جداول احترافية للملخص والمراجعة */
 .math-markdown-content table {
   @apply w-full border-collapse my-6 bg-white rounded-2xl overflow-hidden shadow-sm border border-slate-200 text-sm leading-relaxed;

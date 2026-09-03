@@ -40,7 +40,10 @@ import {
   Clock,
   CheckCircle,
   FileText,
-  Boxes
+  Boxes,
+  Pin,
+  Trophy,
+  HelpCircle as QuestionIcon
 } from 'lucide-react';
 
 interface StudentUnitStudyViewProps {
@@ -67,6 +70,94 @@ export const StudentUnitStudyView: React.FC<StudentUnitStudyViewProps> = ({
 
   // Student progress state
   const [progress, setProgress] = useState<StudentProgress | null>(null);
+
+  // Helper to extract SVG tags
+  const extractSvgs = (svgCodeStr?: string): string[] => {
+    if (!svgCodeStr) return [];
+    const matches = svgCodeStr.match(/<svg[\s\S]*?<\/svg>/gi);
+    if (matches && matches.length > 0) return matches;
+    if (svgCodeStr.trim().startsWith('<svg')) return [svgCodeStr.trim()];
+    return [];
+  };
+
+  const makeSvgResponsive = (svg: string): string => {
+    let processed = svg.trim();
+    if (!processed.startsWith('<svg')) {
+      const match = processed.match(/<svg[\s\S]*<\/svg>/);
+      if (match) processed = match[0];
+      else return '';
+    }
+    if (!processed.includes('viewBox=') && !processed.includes('viewBox =')) {
+      const widthMatch = processed.match(/width="?(\d+(?:\.\d+)?)"?/);
+      const heightMatch = processed.match(/height="?(\d+(?:\.\d+)?)"?/);
+      if (widthMatch && heightMatch) {
+        processed = processed.replace(/<svg\b/, `<svg viewBox="0 0 ${widthMatch[1]} ${heightMatch[1]}"`);
+      }
+    }
+    processed = processed.replace(/width="[^"]+"/, 'width="100%"').replace(/height="[^"]+"/, 'height="100%"');
+    return processed;
+  };
+
+  const getSvgTitle = (svgStr: string, index: number): string => {
+    const match = svgStr.match(/data-title="([^"]*)"/i) || svgStr.match(/data-title='([^']*)'/i);
+    if (match) return match[1];
+    const isHidden = svgStr.toLowerCase().includes('data-title-hidden="true"') || svgStr.toLowerCase().includes("data-title-hidden='true'");
+    if (isHidden) return '';
+    return `الشكل التوضيحي #${index + 1}`;
+  };
+
+  const isSvgTitleHidden = (svgStr: string): boolean => {
+    const lower = svgStr.toLowerCase();
+    return lower.includes('data-title-hidden="true"') || lower.includes("data-title-hidden='true'");
+  };
+
+  // Helper to resolve all section additions and fields
+  const getSectionFullData = (sec: LessonSection) => {
+    const additions = sec.analysis?.additions || [];
+    
+    const getAddition = (index: number, defaultLabel: string, alternativeLabels: string[] = []) => {
+      const itemByIndex = additions[index];
+      const itemByLabel = additions.find(a => 
+        a.label === defaultLabel || alternativeLabels.includes(a.label)
+      );
+      const finalItem = itemByLabel || itemByIndex || { label: defaultLabel, content: '' };
+      return {
+        label: finalItem.label || defaultLabel,
+        content: finalItem.content || '',
+        svgCode: finalItem.svgCode || ''
+      };
+    };
+
+    const guidanceItem = getAddition(0, 'إرشادات ذكية', ['إرشادات ذكية للطالب']);
+    const notesItem = getAddition(1, 'ملاحظات ونتائج هامة', ['ملاحظات ونتائج ذهبية', 'ملاحظات ونتائج ذهبية للفقرة', 'ملاحظات هامة']);
+    const trapsItem = getAddition(2, 'مطبات امتحانية', ['مطبات امتحانية وتحذيرات', 'مطب امتحاني - كُن حذراً']);
+    const examGuidanceItem = getAddition(3, 'الدليل الامتحاني', ['الدليل المنهجي للامتحان', 'طريقة ورود الفكرة في الامتحان']);
+    const exampleItem = getAddition(4, 'تطبيق عملي مكرّس (من الكتاب)', ['تطبيق عملي مكرّس للفهم (من الكتاب السوري)', 'تمرين تطبيقي']);
+    const solutionItem = getAddition(5, 'الحل النموذجي', ['خطوات الحل المنهجي النموذجي']);
+    const extraExampleItem = getAddition(6, 'تمرين إضافي داعم', ['تمرين إضافي مكرّس ذو صياغة ذكية من الذكاء الاصطناعي', 'تمرين إضافي']);
+    const extraSolutionItem = getAddition(7, 'حل التمرين الإضافي', ['الحل النموذجي المفصل للتمرين الإضافي']);
+
+    return {
+      guidanceLabel: guidanceItem.label || 'إرشادات ذكية',
+      guidance: sec.guidance || guidanceItem.content,
+      notesLabel: notesItem.label || 'ملاحظات ونتائج هامة',
+      notes: sec.notes || notesItem.content,
+      trapsLabel: trapsItem.label || 'مطبات امتحانية وتحذيرات',
+      traps: sec.traps || trapsItem.content,
+      examGuidanceLabel: examGuidanceItem.label || 'الدليل الامتحاني المنهجي',
+      examGuidance: sec.examGuidance || examGuidanceItem.content,
+      exampleLabel: exampleItem.label || 'تطبيق عملي مكرّس من الكتاب',
+      exampleText: sec.exampleText || exampleItem.content,
+      exampleSvg: exampleItem.svgCode,
+      solutionLabel: solutionItem.label || 'الحل النموذجي المنهجي',
+      solutionText: sec.solutionText || solutionItem.content,
+      extraExampleLabel: extraExampleItem.label || 'تمرين إضافي مكرّس وذكي',
+      extraExampleText: sec.extraExampleText || extraExampleItem.content,
+      extraExampleSvg: extraExampleItem.svgCode,
+      extraSolutionLabel: extraSolutionItem.label || 'الحل النموذجي للتمرين الإضافي',
+      extraSolutionText: sec.extraSolutionText || extraSolutionItem.content,
+    };
+  };
 
   // Load available units matching student grade & subject
   useEffect(() => {
@@ -458,116 +549,406 @@ export const StudentUnitStudyView: React.FC<StudentUnitStudyViewProps> = ({
         <div className="lg:col-span-8 space-y-6">
           
           {/* VIEW: Theoretical Lesson Section */}
-          {currentSection && !currentSection.isPracticeOnly && (
-            <div className="space-y-6 animate-fade-in">
-              <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-xs">
-                {/* Lesson Header */}
-                <div className="flex items-center justify-between pb-4 border-b border-slate-100 mb-6">
-                  <div>
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-[11px] font-black px-2.5 py-0.5 rounded-full bg-violet-100 text-violet-800">
-                        الدرس النظري {currentSectionIndex + 1}
-                      </span>
-                      {isCurrentSectionCompleted && (
-                        <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex items-center gap-1">
-                          <CheckCircle2 size={12} />
-                          مكتمل
-                        </span>
-                      )}
-                    </div>
-                    <h3 className="text-xl sm:text-2xl font-black text-slate-900">
-                      {currentSection.title}
-                    </h3>
-                  </div>
+          {currentSection && !currentSection.isPracticeOnly && (() => {
+            const fullData = getSectionFullData(currentSection);
+            const mainSvgs = extractSvgs(currentSection.svgCode);
+            const exampleSvgs = extractSvgs(fullData.exampleSvg);
+            const extraExampleSvgs = extractSvgs(fullData.extraExampleSvg);
 
-                  <button
-                    onClick={() => handleMarkSectionComplete(currentSection.id!)}
-                    className={`px-3.5 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs ${
-                      isCurrentSectionCompleted
-                        ? 'bg-emerald-600 text-white hover:bg-emerald-700'
-                        : 'bg-slate-100 text-slate-700 hover:bg-emerald-50 hover:text-emerald-700 hover:border-emerald-300 border border-slate-200'
-                    }`}
-                  >
-                    <CheckCircle size={15} />
-                    <span>{isCurrentSectionCompleted ? 'أتقنت الدرس ✓' : 'تمت دراسة الدرس'}</span>
-                  </button>
-                </div>
+            const isGuidanceActive = !!(fullData.guidance && fullData.guidance.trim());
+            const isNotesActive = !!(fullData.notes && fullData.notes.trim());
+            const isTrapsActive = !!(fullData.traps && fullData.traps.trim());
+            const isExamGuidanceActive = !!(fullData.examGuidance && fullData.examGuidance.trim());
+            const hasSubPedagogicalBoxes = isGuidanceActive || isNotesActive || isTrapsActive || isExamGuidanceActive;
 
-                {/* Content Render via MathRenderer */}
-                <div className="text-slate-800 leading-relaxed text-sm sm:text-base space-y-4">
-                  <MathRenderer content={currentSection.content} />
-                </div>
+            const isExampleActive = !!(fullData.exampleText && fullData.exampleText.trim());
+            const isSolutionActive = !!(fullData.solutionText && fullData.solutionText.trim());
+            const hasTextbookApplication = isExampleActive || isSolutionActive || exampleSvgs.length > 0;
 
-                {/* Guidance & Traps */}
-                {(currentSection.guidance || currentSection.traps || currentSection.notes) && (
-                  <div className="mt-8 pt-6 border-t border-slate-100 space-y-4">
-                    {currentSection.traps && (
-                      <div className="bg-amber-50/80 border border-amber-200/90 rounded-2xl p-4 text-amber-950 text-xs sm:text-sm leading-relaxed">
-                        <div className="flex items-center gap-2 font-black text-amber-900 mb-1.5">
-                          <AlertTriangle size={18} className="text-amber-600" />
-                          المطبات والأفخاخ الامتحانية:
-                        </div>
-                        <MathRenderer content={currentSection.traps} />
-                      </div>
-                    )}
+            const isExtraExampleActive = !!(fullData.extraExampleText && fullData.extraExampleText.trim());
+            const isExtraSolutionActive = !!(fullData.extraSolutionText && fullData.extraSolutionText.trim());
+            const hasExtraAIExercise = isExtraExampleActive || isExtraSolutionActive || extraExampleSvgs.length > 0;
 
-                    {currentSection.guidance && (
-                      <div className="bg-violet-50/80 border border-violet-200/90 rounded-2xl p-4 text-violet-950 text-xs sm:text-sm leading-relaxed">
-                        <div className="flex items-center gap-2 font-black text-violet-900 mb-1.5">
-                          <Lightbulb size={18} className="text-violet-600" />
-                          إرشادات المعلم لحل التمارين:
-                        </div>
-                        <MathRenderer content={currentSection.guidance} />
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Socratic Tutor Launch Callout */}
-                <div className="mt-8 bg-gradient-to-r from-violet-600 to-indigo-700 text-white rounded-2xl p-5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <div className="w-12 h-12 rounded-xl bg-white/15 backdrop-blur-md flex items-center justify-center shrink-0 border border-white/20">
-                      <Bot className="text-amber-300" size={24} />
-                    </div>
+            return (
+              <div className="space-y-6 animate-fade-in">
+                <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-xs space-y-6">
+                  {/* Lesson Header */}
+                  <div className="flex items-center justify-between pb-4 border-b border-slate-100">
                     <div>
-                      <h4 className="font-black text-sm sm:text-base">
-                        هل لديك استفسار أو ترغب في اختبار فهمك؟
-                      </h4>
-                      <p className="text-xs text-violet-100 mt-0.5">
-                        اسأل المعلم السقراطي الذكي ليقودك بحوار تفاعلي مؤتمت بالخيارات.
-                      </p>
+                      <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                        <span className="text-[11px] font-black px-2.5 py-0.5 rounded-full bg-violet-100 text-violet-800 border border-violet-200">
+                          الدرس النظري {currentSectionIndex + 1}
+                        </span>
+                        {isCurrentSectionCompleted && (
+                          <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 flex items-center gap-1 border border-emerald-200">
+                            <CheckCircle2 size={12} />
+                            مكتمل ومُتقَن
+                          </span>
+                        )}
+                        <span className="text-[11px] font-medium text-slate-400">
+                          منهاج الجمهورية العربية السورية - بكالوريا علمي
+                        </span>
+                      </div>
+                      <h3 className="text-xl sm:text-2xl font-black text-slate-900">
+                        {currentSection.title}
+                      </h3>
                     </div>
+
+                    <button
+                      onClick={() => handleMarkSectionComplete(currentSection.id!)}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs ${
+                        isCurrentSectionCompleted
+                          ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                          : 'bg-slate-100 text-slate-700 hover:bg-emerald-50 hover:text-emerald-700 hover:border-emerald-300 border border-slate-200'
+                      }`}
+                    >
+                      <CheckCircle size={15} />
+                      <span>{isCurrentSectionCompleted ? 'أتقنت الدرس ✓' : 'تمت دراسة الدرس'}</span>
+                    </button>
                   </div>
 
-                  <button
-                    onClick={() => {
-                      setActiveSocraticSection(currentSection);
-                      setIsSocraticModalOpen(true);
-                    }}
-                    className="bg-white hover:bg-violet-50 text-violet-900 font-black px-4 py-2.5 rounded-xl text-xs sm:text-sm transition-all shadow-sm active:scale-95 flex items-center justify-center gap-2 cursor-pointer shrink-0"
-                  >
-                    <Sparkles size={16} className="text-amber-500" />
-                    <span>اسأل المعلم السقراطي</span>
-                  </button>
-                </div>
-              </div>
+                  {/* Concept Label if present */}
+                  {currentSection.conceptLabel && currentSection.conceptLabel !== 'صياغة الفكرة بأسلوب الطالب والتبسيط العلمي الموجه:' && currentSection.conceptLabel.trim() !== '' && (
+                    <div className="inline-flex items-center gap-2 px-3 py-1 rounded-xl bg-violet-50 text-violet-800 text-xs font-black border border-violet-150">
+                      <BookOpen size={14} className="text-violet-600" />
+                      <span>{currentSection.conceptLabel}</span>
+                    </div>
+                  )}
 
-              {/* Embedded Socratic Chat below lesson */}
-              <SocraticLessonChat
-                context={{
-                  sectionTitle: currentSection.title,
-                  sectionContent: currentSection.content,
-                  unitTitle: currentDoc.unit || currentDoc.title,
-                  grade: studentData.grade,
-                  subject: studentData.subject,
-                  guidance: currentSection.guidance,
-                  traps: currentSection.traps,
-                  notes: currentSection.notes
-                }}
-                onMasteryAchieved={() => handleMarkSectionComplete(currentSection.id!)}
-              />
-            </div>
-          )}
+                  {/* Theoretical Content with Integrated Floating Responsive SVGs */}
+                  <div className="relative">
+                    {mainSvgs.length > 0 && (
+                      <div className="sm:float-left w-full sm:w-[280px] md:w-[320px] sm:mr-6 mb-6 p-4 bg-slate-50 rounded-2xl border-2 border-dashed border-violet-200/80 flex flex-col items-center gap-4 shadow-2xs">
+                        {mainSvgs.map((svgHtml, sIdx) => {
+                          const isHidden = isSvgTitleHidden(svgHtml);
+                          const title = getSvgTitle(svgHtml, sIdx);
+                          return (
+                            <div key={sIdx} className="w-full text-center border-b last:border-b-0 border-slate-200/60 pb-3 last:pb-0">
+                              {!isHidden && title && (
+                                <div className="text-[11px] font-black text-violet-800 bg-violet-100/70 border border-violet-200 rounded-lg px-2.5 py-1 mb-2 font-sans inline-block">
+                                  {title}
+                                </div>
+                              )}
+                              <div 
+                                className="w-full overflow-hidden [&>svg]:mx-auto [&>svg]:max-h-[220px] [&>svg]:w-full [&>svg]:h-auto flex justify-center"
+                                dangerouslySetInnerHTML={{ __html: makeSvgResponsive(svgHtml) }} 
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Theoretical text content */}
+                    <div className="text-slate-800 leading-relaxed text-sm sm:text-base min-h-[120px]">
+                      <MathRenderer content={currentSection.content} />
+                    </div>
+
+                    <div className="clear-both"></div>
+                  </div>
+
+                  {/* 4 Pedagogical Boxes: Guidance, Notes, Traps, Exam Guidance */}
+                  {hasSubPedagogicalBoxes && (
+                    <div className="pt-4 border-t border-slate-100">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Notes & Golden Results */}
+                        {isNotesActive && (
+                          <div className="p-4 bg-amber-50/70 rounded-2xl border border-amber-200/90 shadow-2xs flex flex-col relative overflow-hidden">
+                            <span className="absolute top-0 right-0 w-16 h-1 bg-amber-400"></span>
+                            <div className="flex items-center gap-2 font-black text-amber-900 text-xs sm:text-sm mb-2">
+                              <Pin size={16} className="text-amber-600" />
+                              <span>{fullData.notesLabel}</span>
+                            </div>
+                            <div className="text-xs sm:text-sm text-slate-800 leading-relaxed font-sans">
+                              <MathRenderer content={fullData.notes} />
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Exam Traps */}
+                        {isTrapsActive && (
+                          <div className="p-4 bg-rose-50/70 rounded-2xl border border-rose-200/90 shadow-2xs flex flex-col relative overflow-hidden">
+                            <span className="absolute top-0 right-0 w-16 h-1 bg-rose-400"></span>
+                            <div className="flex items-center gap-2 font-black text-rose-900 text-xs sm:text-sm mb-2">
+                              <AlertTriangle size={16} className="text-rose-600" />
+                              <span>{fullData.trapsLabel}</span>
+                            </div>
+                            <div className="text-xs sm:text-sm text-slate-800 leading-relaxed font-sans">
+                              <MathRenderer content={fullData.traps} />
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Exam Guidance */}
+                        {isExamGuidanceActive && (
+                          <div className="p-4 bg-emerald-50/70 rounded-2xl border border-emerald-200/90 shadow-2xs flex flex-col relative overflow-hidden">
+                            <span className="absolute top-0 right-0 w-16 h-1 bg-emerald-400"></span>
+                            <div className="flex items-center gap-2 font-black text-emerald-900 text-xs sm:text-sm mb-2">
+                              <Target size={16} className="text-emerald-600" />
+                              <span>{fullData.examGuidanceLabel}</span>
+                            </div>
+                            <div className="text-xs sm:text-sm text-slate-800 leading-relaxed font-sans">
+                              <MathRenderer content={fullData.examGuidance} />
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Smart Teacher Guidance */}
+                        {isGuidanceActive && (
+                          <div className="p-4 bg-blue-50/70 rounded-2xl border border-blue-200/90 shadow-2xs flex flex-col relative overflow-hidden">
+                            <span className="absolute top-0 right-0 w-16 h-1 bg-blue-400"></span>
+                            <div className="flex items-center gap-2 font-black text-blue-900 text-xs sm:text-sm mb-2">
+                              <Lightbulb size={16} className="text-blue-600" />
+                              <span>{fullData.guidanceLabel}</span>
+                            </div>
+                            <div className="text-xs sm:text-sm text-slate-800 leading-relaxed font-sans">
+                              <MathRenderer content={fullData.guidance} />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Textbook Solved Practical Application */}
+                  {hasTextbookApplication && (
+                    <div className="mt-6 pt-6 border-t border-slate-100 space-y-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-8 h-8 rounded-xl bg-violet-600 text-white flex items-center justify-center font-black shadow-2xs">
+                          <BookOpen size={16} />
+                        </div>
+                        <div>
+                          <h4 className="font-black text-slate-900 text-sm sm:text-base">
+                            {fullData.exampleLabel || 'التمرين التطبيقي المكرّس (من كتاب الوزارة)'}
+                          </h4>
+                          <span className="text-[11px] text-slate-500 font-medium">
+                            تطبيق مباشر لترسيخ المفاهيم النظرية مع الحل النموذجي المفصل
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="bg-slate-50/80 rounded-2xl p-5 border border-slate-200 space-y-4">
+                        {/* Application Question & SVGs */}
+                        {isExampleActive && (
+                          <div className="text-slate-900 text-xs sm:text-sm leading-relaxed">
+                            {exampleSvgs.length > 0 && (
+                              <div className="sm:float-left w-full sm:w-[260px] sm:mr-4 mb-4 p-3 bg-white rounded-xl border border-slate-200 flex flex-col items-center">
+                                {exampleSvgs.map((svgStr, sIdx) => (
+                                  <div 
+                                    key={sIdx}
+                                    className="w-full [&>svg]:mx-auto [&>svg]:max-h-[180px] [&>svg]:w-full flex justify-center"
+                                    dangerouslySetInnerHTML={{ __html: makeSvgResponsive(svgStr) }}
+                                  />
+                                ))}
+                              </div>
+                            )}
+                            <div className="font-black text-violet-900 mb-1.5 flex items-center gap-1.5">
+                              <Sparkles size={14} className="text-amber-500" />
+                              <span>نص التطبيق:</span>
+                            </div>
+                            <MathRenderer content={fullData.exampleText} />
+                            <div className="clear-both"></div>
+                          </div>
+                        )}
+
+                        {/* Model Solution */}
+                        {isSolutionActive && (
+                          <div className="pt-3 border-t border-slate-200/70">
+                            <div className="font-black text-emerald-800 text-xs mb-1.5 flex items-center gap-1.5">
+                              <CheckCircle2 size={14} className="text-emerald-600" />
+                              <span>{fullData.solutionLabel || 'الحل النموذجي المنهجي:'}</span>
+                            </div>
+                            <div className="bg-white rounded-xl p-4 border border-emerald-100 text-xs sm:text-sm leading-relaxed text-slate-800">
+                              <MathRenderer content={fullData.solutionText} />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Extra Dedicated AI Application / Exercise if present */}
+                  {hasExtraAIExercise && (
+                    <div className="mt-6 pt-6 border-t border-slate-100 space-y-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-black shadow-2xs">
+                          <Brain size={16} />
+                        </div>
+                        <div>
+                          <h4 className="font-black text-slate-900 text-sm sm:text-base">
+                            {fullData.extraExampleLabel || 'تمرين إضافي داعم للفهم والتعميق'}
+                          </h4>
+                          <span className="text-[11px] text-indigo-700 font-medium">
+                            مسألة إثرائية ذكية مجهزة لتدعيم المحاكمة الرياضية للطالب
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="bg-indigo-50/40 rounded-2xl p-5 border border-indigo-150 space-y-4">
+                        {isExtraExampleActive && (
+                          <div className="text-slate-900 text-xs sm:text-sm leading-relaxed">
+                            {extraExampleSvgs.length > 0 && (
+                              <div className="sm:float-left w-full sm:w-[260px] sm:mr-4 mb-4 p-3 bg-white rounded-xl border border-slate-200 flex flex-col items-center">
+                                {extraExampleSvgs.map((svgStr, sIdx) => (
+                                  <div 
+                                    key={sIdx}
+                                    className="w-full [&>svg]:mx-auto [&>svg]:max-h-[180px] [&>svg]:w-full flex justify-center"
+                                    dangerouslySetInnerHTML={{ __html: makeSvgResponsive(svgStr) }}
+                                  />
+                                ))}
+                              </div>
+                            )}
+                            <div className="font-black text-indigo-900 mb-1.5 flex items-center gap-1.5">
+                              <Target size={14} className="text-indigo-600" />
+                              <span>نص المسألة الإثرائية:</span>
+                            </div>
+                            <MathRenderer content={fullData.extraExampleText} />
+                            <div className="clear-both"></div>
+                          </div>
+                        )}
+
+                        {isExtraSolutionActive && (
+                          <div className="pt-3 border-t border-indigo-200/60">
+                            <div className="font-black text-indigo-900 text-xs mb-1.5 flex items-center gap-1.5">
+                              <CheckCircle2 size={14} className="text-indigo-600" />
+                              <span>{fullData.extraSolutionLabel || 'الحل النموذجي للتمرين الإضافي:'}</span>
+                            </div>
+                            <div className="bg-white rounded-xl p-4 border border-indigo-100 text-xs sm:text-sm leading-relaxed text-slate-800">
+                              <MathRenderer content={fullData.extraSolutionText} />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Dynamic Practical Exercises List (تمرينات تطبيقية مرافقة للدرس النظري لإثراء الطالب مع الحل) */}
+                  {currentSection.practicalExercises && currentSection.practicalExercises.length > 0 && (
+                    <div className="mt-6 pt-6 border-t border-slate-100 space-y-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-8 h-8 rounded-xl bg-violet-600 text-white flex items-center justify-center font-black shadow-2xs">
+                          <Sparkles size={16} />
+                        </div>
+                        <div>
+                          <h4 className="font-black text-slate-900 text-sm sm:text-base">
+                            {currentSection.practicalSectionLabel || 'التمارين والتطبيقات العملية المرافقة للدرس'}
+                          </h4>
+                          <span className="text-[11px] text-violet-700 font-medium">
+                            تمارين تطبيقية مكرسة لإثراء فهم الطالب مع الحلول النموذجية الكاملة ضمن الدرس
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="space-y-4">
+                        {currentSection.practicalExercises.map((ex, exIdx) => {
+                          const exSvgs = ex.svgCode ? extractSvgs(ex.svgCode) : [];
+                          return (
+                            <div key={ex.id || exIdx} className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs space-y-4 text-right">
+                              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                                <h5 className="font-black text-violet-900 text-sm flex items-center gap-2">
+                                  <span className="w-5 h-5 rounded-full bg-violet-600 text-white text-[10px] font-black flex items-center justify-center">
+                                    {exIdx + 1}
+                                  </span>
+                                  <span>{ex.title || `تمرين تطبيقي #${exIdx + 1}`}</span>
+                                </h5>
+                              </div>
+
+                              {/* Question Text & SVG */}
+                              <div className="text-slate-900 text-xs sm:text-sm leading-relaxed">
+                                {exSvgs.length > 0 && (
+                                  <div className="sm:float-left w-full sm:w-[260px] sm:mr-4 mb-4 p-3 bg-slate-50 rounded-xl border border-slate-200 flex flex-col items-center">
+                                    {exSvgs.map((svgStr, sIdx) => (
+                                      <div 
+                                        key={sIdx}
+                                        className="w-full [&>svg]:mx-auto [&>svg]:max-h-[180px] [&>svg]:w-full flex justify-center"
+                                        dangerouslySetInnerHTML={{ __html: makeSvgResponsive(svgStr) }}
+                                      />
+                                    ))}
+                                  </div>
+                                )}
+                                <div className="font-black text-violet-900 mb-1.5 flex items-center gap-1.5">
+                                  <BookOpen size={14} className="text-violet-600" />
+                                  <span>نص التمرين التطبيقي:</span>
+                                </div>
+                                <div className="bg-slate-50/60 p-3.5 rounded-xl border border-slate-150">
+                                  <MathRenderer content={ex.questionText} />
+                                </div>
+                                <div className="clear-both"></div>
+                              </div>
+
+                              {/* Strategy Text if present */}
+                              {ex.strategyText && ex.strategyText.trim() && (
+                                <div className="bg-amber-50/80 rounded-xl p-3.5 border border-amber-200 text-xs text-amber-950">
+                                  <span className="font-extrabold text-amber-900 block mb-1">💡 فكرة واستراتيجية الحل:</span>
+                                  <MathRenderer content={ex.strategyText} />
+                                </div>
+                              )}
+
+                              {/* Solution Text */}
+                              {ex.solutionText && ex.solutionText.trim() && (
+                                <div className="pt-3 border-t border-slate-100">
+                                  <div className="font-black text-emerald-800 text-xs mb-1.5 flex items-center gap-1.5">
+                                    <CheckCircle2 size={14} className="text-emerald-600" />
+                                    <span>الحل النموذجي المنهجي:</span>
+                                  </div>
+                                  <div className="bg-emerald-50/40 rounded-xl p-4 border border-emerald-150 text-xs sm:text-sm leading-relaxed text-slate-800">
+                                    <MathRenderer content={ex.solutionText} />
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Socratic Tutor Launch Callout */}
+                  <div className="mt-8 bg-gradient-to-r from-violet-600 to-indigo-700 text-white rounded-2xl p-5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="flex items-center gap-3">
+                      <div className="w-12 h-12 rounded-xl bg-white/15 backdrop-blur-md flex items-center justify-center shrink-0 border border-white/20">
+                        <Bot className="text-amber-300" size={24} />
+                      </div>
+                      <div>
+                        <h4 className="font-black text-sm sm:text-base">
+                          هل لديك استفسار أو ترغب في اختبار فهمك؟
+                        </h4>
+                        <p className="text-xs text-violet-100 mt-0.5">
+                          اسأل المعلم السقراطي الذكي ليقودك بحوار تفاعلي مؤتمت بالخيارات.
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        setActiveSocraticSection(currentSection);
+                        setIsSocraticModalOpen(true);
+                      }}
+                      className="bg-white hover:bg-violet-50 text-violet-900 font-black px-4 py-2.5 rounded-xl text-xs sm:text-sm transition-all shadow-sm active:scale-95 flex items-center justify-center gap-2 cursor-pointer shrink-0"
+                    >
+                      <Sparkles size={16} className="text-amber-500" />
+                      <span>اسأل المعلم السقراطي</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Embedded Socratic Chat below lesson */}
+                <SocraticLessonChat
+                  context={{
+                    sectionTitle: currentSection.title,
+                    sectionContent: currentSection.content,
+                    unitTitle: currentDoc.unit || currentDoc.title,
+                    grade: studentData.grade,
+                    subject: studentData.subject,
+                    guidance: fullData.guidance,
+                    traps: fullData.traps,
+                    notes: fullData.notes
+                  }}
+                  onMasteryAchieved={() => handleMarkSectionComplete(currentSection.id!)}
+                />
+              </div>
+            );
+          })()}
 
           {/* VIEW: Practice Exercise Section (Pattern Guided Trainer) */}
           {currentSection && currentSection.isPracticeOnly && (
@@ -610,12 +991,9 @@ export const StudentUnitStudyView: React.FC<StudentUnitStudyViewProps> = ({
                 </div>
               )}
 
-              {/* Exercises List (practiceExercises or practicalExercises) */}
+              {/* Exercises List (practiceExercises for Pattern-Guided Trainer) */}
               {(() => {
-                const allExercises = [
-                  ...(currentSection.practiceExercises || []),
-                  ...(currentSection.practicalExercises || [])
-                ];
+                const allExercises = currentSection.practiceExercises || [];
 
                 if (allExercises.length > 0) {
                   return (

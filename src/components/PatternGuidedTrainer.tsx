@@ -933,15 +933,19 @@ export const PatternGuidedTrainer: React.FC<PatternGuidedTrainerProps> = ({
                     <span>أحسنت! هذا بالضبط ما توقعناه ✅ (إجابة دقيقة وحساب صحيح للناتج النهائي)</span>
                   </div>
                 ) : (
-                  <div className="p-4 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-950 space-y-1.5">
+                  <div className="p-4 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-950 space-y-2 shadow-xs">
                     <div className="flex items-center gap-2 font-black text-amber-900">
                       <AlertTriangle size={17} className="text-amber-700 shrink-0" />
                       <span>تشخيص النتيجة في المحطة الرابعة:</span>
                     </div>
-                    <p className="text-slate-800 leading-relaxed pr-6">
-                      {chosenOptionForFeedback?.misconceptionDiagnosis || 
-                        `اختيارك للخيار (${String.fromCharCode(65 + (station4SelectedOptionIndex ?? 0))}) يشير إلى نقطة انحراف محتملة في إشارة أو خطوة حسابية وسيطة. طالع الحل المفصل أدناه لتثبيت الفهم التام.`}
-                    </p>
+                    <div className="text-slate-800 leading-relaxed pr-6 text-xs sm:text-sm font-medium">
+                      <MathRenderer
+                        content={
+                          chosenOptionForFeedback?.misconceptionDiagnosis || 
+                          `اختيارك للخيار (${String.fromCharCode(65 + (station4SelectedOptionIndex ?? 0))}) يشير إلى نقطة انحراف محتملة في إشارة أو خطوة حسابية وسيطة. طالع الحل المفصل أدناه لتثبيت الفهم التام.`
+                        }
+                      />
+                    </div>
                   </div>
                 )}
 
