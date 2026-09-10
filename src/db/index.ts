@@ -135,6 +135,7 @@ export interface LessonSection {
   solutionText?: string;
   extraExampleText?: string;
   extraSolutionText?: string;
+  youtubeUrl?: string; // رابط فيديو يوتيوب اختياري خاص بهذا الدرس تحديداً
 }
 
 export interface PdfContent {
@@ -512,6 +513,25 @@ export class MathEducatorDB extends Dexie {
     });
 
     this.version(18).stores({
+      documents: '++id, title, country, grade, subject, part, unit, topic, type, createdAt, updatedAt',
+      exercises: '++id, docId, order, family_id',
+      lessonSections: '++id, docId, order',
+      pdfContents: '++id, docId',
+      tests: '++id, title, country, grade, subject, difficulty, createdAt, categoryId, [grade+subject]',
+      questionBanks: '++id, docId, unit, title, country, grade, subject, [grade+subject]',
+      testCategories: '++id, name',
+      examSummaries: '++id, title, country, grade, subject, createdAt',
+      pastPapers: '++id, title, country, grade, subject, createdAt',
+      unitQuizzes: '++id, docId, unit, grade, subject, createdAt',
+      unitMindMaps: '++id, docId, unit, createdAt',
+      unitComprehensiveReviews: '++id, docId, unit, createdAt',
+      studentProgress: '++id, studentName, [grade+subject], unitTitle, lastActive',
+      exerciseFamilies: '++id, docId, unitId, familyName, createdAt',
+      exerciseStations: '++id, exerciseId, stationOrder',
+      syncMappings: '++id, [localTable+localId], remoteId, localTable'
+    });
+
+    this.version(19).stores({
       documents: '++id, title, country, grade, subject, part, unit, topic, type, createdAt, updatedAt',
       exercises: '++id, docId, order, family_id',
       lessonSections: '++id, docId, order',

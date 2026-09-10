@@ -731,6 +731,7 @@ export type Database = {
           id: string
           illustrations_label: string | null
           is_practice_only: boolean | null
+          lesson_id: string | null
           notes: string | null
           order_index: number
           practical_section_label: string | null
@@ -739,6 +740,8 @@ export type Database = {
           svg_code: string | null
           title: string
           traps: string | null
+          unit_id: string | null
+          youtube_url: string | null
         }
         Insert: {
           analysis_additions?: Json | null
@@ -754,6 +757,7 @@ export type Database = {
           id?: string
           illustrations_label?: string | null
           is_practice_only?: boolean | null
+          lesson_id?: string | null
           notes?: string | null
           order_index: number
           practical_section_label?: string | null
@@ -762,6 +766,8 @@ export type Database = {
           svg_code?: string | null
           title: string
           traps?: string | null
+          unit_id?: string | null
+          youtube_url?: string | null
         }
         Update: {
           analysis_additions?: Json | null
@@ -777,6 +783,7 @@ export type Database = {
           id?: string
           illustrations_label?: string | null
           is_practice_only?: boolean | null
+          lesson_id?: string | null
           notes?: string | null
           order_index?: number
           practical_section_label?: string | null
@@ -785,6 +792,8 @@ export type Database = {
           svg_code?: string | null
           title?: string
           traps?: string | null
+          unit_id?: string | null
+          youtube_url?: string | null
         }
         Relationships: [
           {

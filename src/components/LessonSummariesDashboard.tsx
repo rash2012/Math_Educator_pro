@@ -48,7 +48,10 @@ import {
   Globe,
   GraduationCap,
   Layers,
-  Cloud
+  Cloud,
+  Video,
+  ExternalLink,
+  Play
 } from 'lucide-react';
 import { CustomDialog } from './ui/CustomDialog';
 import { AcademicMetadataFields } from './AcademicMetadataFields';
@@ -113,6 +116,7 @@ export const LessonSummariesDashboard: React.FC = () => {
     practiceSectionLabel?: string;
     practicalSectionLabel?: string;
     isPracticeOnly?: boolean;
+    youtubeUrl?: string;
   } | null>(null);
 
   // States for exercise AI loaders and inputs
@@ -122,6 +126,11 @@ export const LessonSummariesDashboard: React.FC = () => {
   // States for manual exercise editing and AI verification modals
   const [editingTitleSecId, setEditingTitleSecId] = useState<number | null>(null);
   const [newTitleValue, setNewTitleValue] = useState('');
+
+  // States for YouTube video link editing and embedded playback
+  const [editingYoutubeSecId, setEditingYoutubeSecId] = useState<number | null>(null);
+  const [youtubeUrlValue, setYoutubeUrlValue] = useState('');
+  const [expandedVideoSecId, setExpandedVideoSecId] = useState<number | null>(null);
 
   const [editingExModal, setEditingExModal] = useState<{
     sectionId: number;
@@ -1243,6 +1252,7 @@ export const LessonSummariesDashboard: React.FC = () => {
     setAiEditingSvgGenerating(false);
     setEditSectionForm({
       title: sec.title,
+      youtubeUrl: sec.youtubeUrl || '',
       concept: sec.content,
       svgCode: sec.svgCode || '',
       isPracticeOnly: sec.isPracticeOnly || false,
@@ -1261,6 +1271,7 @@ export const LessonSummariesDashboard: React.FC = () => {
     try {
       await db.lessonSections.update(editingSectionId, {
         title: editSectionForm.title,
+        youtubeUrl: editSectionForm.youtubeUrl ? editSectionForm.youtubeUrl.trim() : undefined,
         content: editSectionForm.concept,
         svgCode: editSectionForm.svgCode,
         isPracticeOnly: editSectionForm.isPracticeOnly || false,
@@ -1722,6 +1733,7 @@ export const LessonSummariesDashboard: React.FC = () => {
     fieldUpdates: Partial<{
       title: string;
       content: string;
+      youtubeUrl?: string;
       guidance: string;
       notes: string;
       traps: string;
@@ -1777,6 +1789,7 @@ export const LessonSummariesDashboard: React.FC = () => {
 
       if (fieldUpdates.title !== undefined) dbUpdates.title = fieldUpdates.title;
       if (fieldUpdates.content !== undefined) dbUpdates.content = fieldUpdates.content;
+      if (fieldUpdates.youtubeUrl !== undefined) dbUpdates.youtubeUrl = fieldUpdates.youtubeUrl;
 
       await db.lessonSections.update(sectionId, dbUpdates);
 
@@ -1794,6 +1807,27 @@ export const LessonSummariesDashboard: React.FC = () => {
       console.error("Error saving section field update:", error);
       showAlert('خطأ في الحفظ', 'تعذر حفظ التعديل في قاعدة البيانات.');
     }
+  };
+
+  const extractYouTubeVideoId = (url?: string): string | null => {
+    if (!url) return null;
+    const clean = url.trim();
+    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+    const match = clean.match(regExp);
+    return (match && match[2].length === 11) ? match[2] : null;
+  };
+
+  const handleSaveYoutubeUrl = async (sectionId: number, url: string) => {
+    const cleanUrl = url.trim();
+    await saveSectionFieldUpdate(sectionId, { youtubeUrl: cleanUrl || undefined });
+    setEditingYoutubeSecId(null);
+    setYoutubeUrlValue('');
+    showAlert(
+      'تم الحفظ بنجاح ✓', 
+      cleanUrl 
+        ? 'تم حفظ وتحديث رابط فيديو YouTube لهذا الدرس بنجاح، وسيرفع إلى حقل youtube_url تلقائياً عند المزامنة.' 
+        : 'تمت إزالة رابط فيديو YouTube من هذا الدرس.'
+    );
   };
 
   const handleSaveTitle = async (sectionId: number) => {
@@ -3551,6 +3585,33 @@ export const LessonSummariesDashboard: React.FC = () => {
                             </div>
                           </div>
                           
+                          {/* رابط فيديو يوتيوب اختياري خاص بهذا الدرس */}
+                          <div className="bg-red-50/60 border border-red-200/80 rounded-2xl p-3.5 space-y-1.5 mb-4">
+                            <div className="flex items-center justify-between">
+                              <label className="text-xs font-black text-red-950 flex items-center gap-1.5">
+                                <span>🎥 رابط فيديو يوتيوب للدرس:</span>
+                                <span className="text-[11px] font-normal text-red-600">(اختياري — خاص بهذا الدرس تحديداً)</span>
+                              </label>
+                              {editSectionForm.youtubeUrl && (
+                                <a 
+                                  href={editSectionForm.youtubeUrl} 
+                                  target="_blank" 
+                                  rel="noopener noreferrer" 
+                                  className="text-[11px] font-bold text-red-700 hover:text-red-800 underline"
+                                >
+                                  معاينة الرابط ↗
+                                </a>
+                              )}
+                            </div>
+                            <input 
+                              type="url"
+                              className="w-full px-4 py-2 text-xs border border-red-200 rounded-xl focus:ring-2 focus:ring-red-500 bg-white font-medium text-gray-800 placeholder-gray-400 outline-none dir-ltr"
+                              placeholder="https://www.youtube.com/watch?v=... أو https://youtu.be/..."
+                              value={editSectionForm.youtubeUrl || ''}
+                              onChange={e => setEditSectionForm(prev => prev ? ({ ...prev, youtubeUrl: e.target.value }) : null)}
+                            />
+                          </div>
+
                           <div className={editSectionForm.isPracticeOnly ? "w-full mb-4" : "grid grid-cols-1 md:grid-cols-2 gap-4"}>
                             <div className={editSectionForm.isPracticeOnly ? "w-full" : ""}>
                               <div className="flex justify-between items-center mb-1">
@@ -4889,63 +4950,179 @@ export const LessonSummariesDashboard: React.FC = () => {
                             const isPractice = !!sec.isPracticeOnly;
                             const { mainTitle, cleanTitle, lessonNumberLabel } = formatLessonHeaderTitle(sec.title, idx, isPractice);
                             return (
-                              <div id={`lesson-section-${sec.id}`} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b-2 border-violet-100 pb-3 print:pb-1">
-                                <div className="flex items-center gap-3 flex-1 flex-wrap">
-                                  <span className={`px-3 py-1 rounded-xl font-black text-xs sm:text-sm shadow-xs flex items-center gap-1.5 print:px-2 print:py-0.5 print:text-xs shrink-0 ${
-                                    isPractice ? 'bg-amber-500 text-white' : 'bg-violet-600 text-white'
-                                  }`}>
-                                    <span>{isPractice ? '✍️' : '📘'}</span>
-                                    <span>{lessonNumberLabel}</span>
-                                  </span>
+                              <div id={`lesson-section-${sec.id}`} className="flex flex-col gap-3 border-b-2 border-violet-100 pb-3 print:pb-1">
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 flex-wrap">
+                                  <div className="flex items-center gap-3 flex-1 flex-wrap">
+                                    <span className={`px-3 py-1 rounded-xl font-black text-xs sm:text-sm shadow-xs flex items-center gap-1.5 print:px-2 print:py-0.5 print:text-xs shrink-0 ${
+                                      isPractice ? 'bg-amber-500 text-white' : 'bg-violet-600 text-white'
+                                    }`}>
+                                      <span>{isPractice ? '✍️' : '📘'}</span>
+                                      <span>{lessonNumberLabel}</span>
+                                    </span>
 
-                                  {editingTitleSecId === sec.id ? (
-                                    <div className="flex items-center gap-2 flex-1 max-w-xl no-print">
-                                      <input
-                                        type="text"
-                                        value={newTitleValue}
-                                        onChange={(e) => setNewTitleValue(e.target.value)}
-                                        className="px-3 py-1.5 border-2 border-violet-400 rounded-xl text-sm font-bold w-full bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-violet-500"
-                                        placeholder="اكتب عنوان الدرس الجديد..."
-                                        autoFocus
-                                        onKeyDown={(e) => {
-                                          if (e.key === 'Enter') handleSaveTitle(sec.id!);
-                                          if (e.key === 'Escape') setEditingTitleSecId(null);
-                                        }}
-                                      />
-                                      <button
-                                        type="button"
-                                        onClick={() => handleSaveTitle(sec.id!)}
-                                        className="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-xs font-bold shrink-0 cursor-pointer shadow-xs"
-                                      >
-                                        حفظ 💾
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setEditingTitleSecId(null)}
-                                        className="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-xs font-bold shrink-0 cursor-pointer"
-                                      >
-                                        إلغاء
-                                      </button>
-                                    </div>
-                                  ) : (
-                                    <div className="flex items-center gap-2 group/title">
-                                      <h2 className="text-xl md:text-2xl font-black text-gray-900 tracking-tight print:text-base">
-                                        {cleanTitle}
-                                      </h2>
+                                    {editingTitleSecId === sec.id ? (
+                                      <div className="flex items-center gap-2 flex-1 max-w-xl no-print">
+                                        <input
+                                          type="text"
+                                          value={newTitleValue}
+                                          onChange={(e) => setNewTitleValue(e.target.value)}
+                                          className="px-3 py-1.5 border-2 border-violet-400 rounded-xl text-sm font-bold w-full bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                          placeholder="اكتب عنوان الدرس الجديد..."
+                                          autoFocus
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter') handleSaveTitle(sec.id!);
+                                            if (e.key === 'Escape') setEditingTitleSecId(null);
+                                          }}
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() => handleSaveTitle(sec.id!)}
+                                          className="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-xs font-bold shrink-0 cursor-pointer shadow-xs"
+                                        >
+                                          حفظ 💾
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setEditingTitleSecId(null)}
+                                          className="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-xs font-bold shrink-0 cursor-pointer"
+                                        >
+                                          إلغاء
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      <div className="flex items-center gap-2 group/title">
+                                        <h2 className="text-xl md:text-2xl font-black text-gray-900 tracking-tight print:text-base">
+                                          {cleanTitle}
+                                        </h2>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setEditingTitleSecId(sec.id!);
+                                            setNewTitleValue(sec.title || '');
+                                          }}
+                                          className="p-1 text-gray-400 hover:text-violet-600 hover:bg-violet-50 rounded-lg transition-all no-print cursor-pointer"
+                                          title="تعديل عنوان هذا الدرس"
+                                        >
+                                          <Edit3 size={15} />
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  {/* YouTube Action Buttons & Link Controls (In-App Player Only, No External YouTube Opening) */}
+                                  <div className="flex items-center gap-2 flex-wrap no-print">
+                                    {sec.youtubeUrl ? (
+                                      <div className="flex items-center gap-1.5 bg-red-50 hover:bg-red-100/90 border border-red-200 text-red-700 px-3 py-1.5 rounded-xl text-xs font-bold transition-all shadow-2xs">
+                                        <Video size={15} className="text-red-600" />
+                                        <button
+                                          type="button"
+                                          onClick={() => setExpandedVideoSecId(expandedVideoSecId === sec.id ? null : sec.id!)}
+                                          className="flex items-center gap-1.5 font-black text-red-950 hover:text-red-700 cursor-pointer"
+                                          title={expandedVideoSecId === sec.id ? "إخفاء مشغل الفيديو" : "تشغيل ومشاهدة فيديو الشرح داخل التطبيق"}
+                                        >
+                                          <Play size={12} className={expandedVideoSecId === sec.id ? "text-red-500" : "text-red-600 fill-red-600"} />
+                                          <span>{expandedVideoSecId === sec.id ? "إغلاق المشغل ✕" : "مشاهدة الفيديو داخل التطبيق 🎬"}</span>
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setEditingYoutubeSecId(sec.id!);
+                                            setYoutubeUrlValue(sec.youtubeUrl || '');
+                                          }}
+                                          className="p-1 hover:bg-red-200/80 rounded text-red-800 transition-colors cursor-pointer mr-1"
+                                          title="تعديل رابط فيديو YouTube"
+                                        >
+                                          <Edit3 size={13} />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleSaveYoutubeUrl(sec.id!, '')}
+                                          className="p-1 hover:bg-red-200/80 rounded text-red-800 transition-colors cursor-pointer"
+                                          title="حذف رابط الفيديو"
+                                        >
+                                          <X size={13} />
+                                        </button>
+                                      </div>
+                                    ) : (
                                       <button
                                         type="button"
                                         onClick={() => {
-                                          setEditingTitleSecId(sec.id!);
-                                          setNewTitleValue(sec.title || '');
+                                          setEditingYoutubeSecId(sec.id!);
+                                          setYoutubeUrlValue('');
                                         }}
-                                        className="p-1 text-gray-400 hover:text-violet-600 hover:bg-violet-50 rounded-lg transition-all no-print cursor-pointer"
-                                        title="تعديل عنوان هذا الدرس"
+                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-red-700 bg-red-50 hover:bg-red-100/90 border border-red-200/90 rounded-xl transition-all shadow-2xs cursor-pointer"
+                                        title="إضافة رابط فيديو YouTube اختياري خاص بهذا الدرس"
                                       >
-                                        <Edit3 size={15} />
+                                        <Video size={14} className="text-red-600" />
+                                        <span>+ رابط YouTube 🎥</span>
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {/* YouTube Quick Input Form */}
+                                {editingYoutubeSecId === sec.id && (
+                                  <div className="flex items-center gap-2 p-3 bg-red-50 border border-red-300 rounded-2xl w-full no-print shadow-xs animate-fadeIn">
+                                    <Video size={16} className="text-red-600 shrink-0" />
+                                    <div className="flex-1">
+                                      <input
+                                        type="url"
+                                        value={youtubeUrlValue}
+                                        onChange={(e) => setYoutubeUrlValue(e.target.value)}
+                                        className="w-full px-3 py-1.5 text-xs border border-red-200 rounded-xl focus:ring-2 focus:ring-red-500 bg-white font-medium text-gray-800 placeholder-gray-400 outline-none dir-ltr"
+                                        placeholder="https://www.youtube.com/watch?v=... أو https://youtu.be/..."
+                                        autoFocus
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter') handleSaveYoutubeUrl(sec.id!, youtubeUrlValue);
+                                          if (e.key === 'Escape') setEditingYoutubeSecId(null);
+                                        }}
+                                      />
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSaveYoutubeUrl(sec.id!, youtubeUrlValue)}
+                                      className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-black cursor-pointer shrink-0 shadow-xs"
+                                    >
+                                      حفظ الرابط ✓
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditingYoutubeSecId(null)}
+                                      className="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-xs font-bold cursor-pointer shrink-0"
+                                    >
+                                      إلغاء
+                                    </button>
+                                  </div>
+                                )}
+
+                                {/* Embedded YouTube Video Player (Collapsible) */}
+                                {expandedVideoSecId === sec.id && sec.youtubeUrl && extractYouTubeVideoId(sec.youtubeUrl) && (
+                                  <div className="w-full bg-black rounded-2xl overflow-hidden shadow-lg border border-red-300 no-print animate-fadeIn my-2">
+                                    <div className="flex items-center justify-between bg-zinc-900 text-white px-4 py-2 text-xs font-bold">
+                                      <span className="flex items-center gap-1.5">
+                                        <Video size={14} className="text-red-500" />
+                                        <span>مشغل فيديو الشرح المدمج: {cleanTitle}</span>
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => setExpandedVideoSecId(null)}
+                                        className="text-gray-400 hover:text-white cursor-pointer"
+                                      >
+                                        <X size={14} />
                                       </button>
                                     </div>
-                                  )}
-                                </div>
+                                    <div className="relative pt-[56.25%] w-full">
+                                      <iframe
+                                        className="absolute top-0 left-0 w-full h-full"
+                                        src={`https://www.youtube.com/embed/${extractYouTubeVideoId(sec.youtubeUrl)}?rel=0`}
+                                        title={`فيديو شرح: ${cleanTitle}`}
+                                        frameBorder="0"
+                                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                                        allowFullScreen
+                                      />
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                             );
                           })()}

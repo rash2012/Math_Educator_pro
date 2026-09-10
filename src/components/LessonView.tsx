@@ -253,7 +253,11 @@ export const LessonView: React.FC<LessonViewProps> = ({ docId, onBack }) => {
   };
 
   const handleSave = async (id: number) => {
-    await db.lessonSections.update(id, editContent);
+    const payload = {
+      ...editContent,
+      youtubeUrl: editContent.youtubeUrl ? editContent.youtubeUrl.trim() : undefined
+    };
+    await db.lessonSections.update(id, payload);
     setEditingId(null);
     loadData();
   };
@@ -469,6 +473,33 @@ export const LessonView: React.FC<LessonViewProps> = ({ docId, onBack }) => {
                 <div className="p-6">
                   {editingId === section.id ? (
                     <div className="space-y-4">
+                      {/* رابط فيديو يوتيوب اختياري خاص بهذا الدرس */}
+                      <div className="bg-red-50/60 border border-red-200/80 rounded-xl p-3.5 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <label className="text-xs font-black text-red-950 flex items-center gap-1.5">
+                            <span>🎥 رابط فيديو يوتيوب للدرس:</span>
+                            <span className="text-[11px] font-normal text-red-600">(اختياري — خاص بهذا الدرس تحديداً)</span>
+                          </label>
+                          {editContent.youtubeUrl && (
+                            <a 
+                              href={editContent.youtubeUrl} 
+                              target="_blank" 
+                              rel="noopener noreferrer" 
+                              className="text-[11px] font-bold text-red-700 hover:text-red-800 underline"
+                            >
+                              معاينة الرابط ↗
+                            </a>
+                          )}
+                        </div>
+                        <input 
+                          type="url"
+                          className="w-full px-3.5 py-2 text-xs border border-red-200 rounded-lg focus:ring-2 focus:ring-red-500 bg-white font-medium text-gray-800 placeholder-gray-400 outline-none dir-ltr"
+                          placeholder="https://www.youtube.com/watch?v=... أو https://youtu.be/..."
+                          value={editContent.youtubeUrl || ''}
+                          onChange={e => setEditContent(prev => ({ ...prev, youtubeUrl: e.target.value }))}
+                        />
+                      </div>
+
                       <div className="flex gap-4 items-end">
                         <div className="flex-1">
                           <label className="text-xs font-bold text-gray-500 mb-1 block">عنوان الفقرة:</label>

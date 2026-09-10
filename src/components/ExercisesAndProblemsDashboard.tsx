@@ -6,7 +6,7 @@ import { DocumentMetadataModal } from './DocumentMetadataModal';
 import { 
   ArrowRight, Plus, Trash2, Edit3, Printer, Download, Upload, Save, X, Eye, EyeOff, 
   FileText, Globe, GraduationCap, BookOpen, Layers, BookMarked,
-  Sparkles, Loader2, Filter, Settings2, CheckCircle2, Cloud
+  Sparkles, Loader2, Filter, Settings2, CheckCircle2, Cloud, Video, ExternalLink, Play
 } from 'lucide-react';
 import { SyncControlButton } from './SyncControlButton';
 import { UnitSyncIndicator } from './UnitSyncIndicator';
@@ -120,6 +120,76 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
   }>({
     isOpen: false, title: '', message: '', type: 'alert'
   });
+
+  // State to refresh aggregate sync indicator on booklet sync
+  const [syncRefreshKey, setSyncRefreshKey] = useState(0);
+
+  // Section title editing state
+  const [editingSectionId, setEditingSectionId] = useState<number | null>(null);
+  const [editingSectionTitle, setEditingSectionTitle] = useState<string>('');
+
+  const handleUpdateSectionTitle = async (secId: number, newTitle: string) => {
+    if (!newTitle.trim()) return;
+    try {
+      await db.lessonSections.update(secId, {
+        title: newTitle.trim(),
+        practiceSectionLabel: newTitle.trim(),
+        content: 'تمرينات ومسائل الوحدة المستخلصة من المرجع الأصلي',
+        isPracticeOnly: true,
+        conceptLabel: '',
+        illustrationsLabel: '',
+        practicalSectionLabel: '',
+        analysis: { additions: [] }
+      });
+      if (activeDocId) {
+        await db.documents.update(activeDocId, { updatedAt: Date.now() });
+      }
+      setEditingSectionId(null);
+      showAlert('تم التعديل بنجاح ✓', `تم تعديل وتوحيد مسمى القسم إلى: "${newTitle.trim()}" في قاعدة البيانات المحلية.`);
+    } catch (err: any) {
+      showAlert('خطأ', err?.message || 'فشل تعديل مسمى القسم');
+    }
+  };
+
+  const handleStandardizeSection = async (secId: number) => {
+    const targetTitle = activeDocument?.title || 'تمرينات ومسائل الوحدة';
+    await handleUpdateSectionTitle(secId, targetTitle);
+  };
+
+  // Section YouTube editing state
+  const [editingYoutubeSecId, setEditingYoutubeSecId] = useState<number | null>(null);
+  const [youtubeUrlValue, setYoutubeUrlValue] = useState<string>('');
+  const [expandedVideoSecId, setExpandedVideoSecId] = useState<number | null>(null);
+
+  const extractYouTubeVideoId = (url?: string): string | null => {
+    if (!url) return null;
+    const clean = url.trim();
+    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+    const match = clean.match(regExp);
+    return (match && match[2].length === 11) ? match[2] : null;
+  };
+
+  const handleUpdateSectionYoutube = async (secId: number, newUrl: string) => {
+    const trimmed = newUrl.trim();
+    try {
+      await db.lessonSections.update(secId, {
+        youtubeUrl: trimmed || undefined
+      });
+      if (activeDocId) {
+        await db.documents.update(activeDocId, { updatedAt: Date.now() });
+      }
+      setEditingYoutubeSecId(null);
+      setYoutubeUrlValue('');
+      showAlert(
+        'تم الحفظ بنجاح ✓', 
+        trimmed 
+          ? 'تم حفظ رابط فيديو YouTube لكراسة التمارين والمسائل بنجاح، وسيرفع إلى السحابة تلقائياً.' 
+          : 'تمت إزالة رابط فيديو YouTube من الكراسة.'
+      );
+    } catch (err: any) {
+      showAlert('خطأ', err?.message || 'فشل حفظ رابط YouTube');
+    }
+  };
 
   // Exercise Families AI Classification Modal State
   const [familiesModalData, setFamiliesModalData] = useState<{
@@ -1385,7 +1455,7 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
                 <div>
                   <div className="flex items-center gap-2 flex-wrap">
                     <h4 className="text-sm font-black text-slate-900">اعتماد ونشر كراسة التمارين والمسائل سحابياً (Supabase)</h4>
-                    <UnitSyncIndicator docId={activeDocument.id} compact={false} />
+                    <UnitSyncIndicator key={`${activeDocument.id}-${syncRefreshKey}`} docId={activeDocument.id} compact={false} />
                   </div>
                   <p className="text-xs text-slate-600 font-medium mt-0.5">
                     يشمل المزامنة الكاملة: نص السؤال • الحل المفصل والتكتيك • رسوم الـ SVG • عائلات التمارين • المحطات التوجيهية الـ 4 والخيارات والمشتتات والتلميحات
@@ -1400,6 +1470,7 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
                   data={activeDocument}
                   showDraftOption={true}
                   buttonText="نشر ومزامنة التمارين والمسائل بالكامل"
+                  onSyncComplete={() => setSyncRefreshKey(k => k + 1)}
                 />
               </div>
             </div>
@@ -1430,17 +1501,6 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
 
             {/* Action Buttons */}
             <div className="flex flex-wrap gap-2 items-center">
-              {/* Cloud Sync Direct Button */}
-              {activeDocument?.id && (
-                <SyncControlButton
-                  table="documents"
-                  id={activeDocument.id}
-                  data={activeDocument}
-                  variant="compact"
-                  showDraftOption={true}
-                />
-              )}
-
               {/* AI Family Classification & Stations Generator */}
               <button
                 onClick={() => activeDocument && handleOpenFamiliesModal(activeDocument)}
@@ -1591,28 +1651,191 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
                         return (
                           <div key={sec.id || secIdx} className="bg-white p-6 rounded-3xl border border-violet-100 print:p-0 print:border-none print:shadow-none print:bg-transparent shadow-xs space-y-6 print:space-y-4">
                             {/* Section Header (Hidden in Print to prevent redundant title after cover page) */}
-                            <div className="flex items-center justify-between border-b border-violet-100 pb-3 no-print">
-                              <h3 className="text-base font-black text-violet-900 font-sans flex items-center gap-2">
+                            <div className="flex items-center justify-between border-b border-violet-100 pb-3 no-print flex-wrap gap-2">
+                              <div className="flex items-center gap-2 flex-wrap">
                                 <span className="w-2 h-5 bg-violet-600 rounded-full" />
-                                <span>{sec.practiceSectionLabel || sec.title || 'التمارين والمسائل (فقرة تدرّب)'}</span>
-                              </h3>
-                              <button
-                                onClick={() => {
-                                  const newEx: PracticeExercise = {
-                                    id: `ex_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-                                    title: `التمرين ${exercises.length + 1}`,
-                                    questionText: '',
-                                    strategyText: '',
-                                    solutionText: '',
-                                    svgCode: ''
-                                  };
-                                  setEditingExModal({ sectionId: sec.id!, exercise: newEx });
-                                }}
-                                className="no-print inline-flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-black rounded-xl shadow-xs transition-all cursor-pointer"
-                              >
-                                <Plus size={14} /> إضافة تمرين جديد ➕
-                              </button>
+                                {editingSectionId === sec.id ? (
+                                  <div className="flex items-center gap-1.5">
+                                    <input
+                                      type="text"
+                                      value={editingSectionTitle}
+                                      onChange={(e) => setEditingSectionTitle(e.target.value)}
+                                      className="px-3 py-1 text-sm font-bold border border-violet-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500 bg-white"
+                                      placeholder="عنوان قسم التمارين والمسائل..."
+                                      autoFocus
+                                    />
+                                    <button
+                                      onClick={() => sec.id && handleUpdateSectionTitle(sec.id, editingSectionTitle)}
+                                      className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg cursor-pointer"
+                                    >
+                                      حفظ ✓
+                                    </button>
+                                    <button
+                                      onClick={() => setEditingSectionId(null)}
+                                      className="px-2.5 py-1 bg-gray-200 hover:bg-gray-300 text-gray-700 text-xs font-bold rounded-lg cursor-pointer"
+                                    >
+                                      إلغاء
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <h3 className="text-base font-black text-violet-900 font-sans">
+                                      {sec.title || sec.practiceSectionLabel || 'التمارين والمسائل (فقرة تدرّب)'}
+                                    </h3>
+                                    <button
+                                      onClick={() => {
+                                        setEditingSectionId(sec.id!);
+                                        setEditingSectionTitle(sec.title || sec.practiceSectionLabel || '');
+                                      }}
+                                      className="text-violet-600 hover:text-violet-800 p-1 hover:bg-violet-50 rounded-lg cursor-pointer transition-colors"
+                                      title="تعديل مسمى هذا القسم في قاعدة البيانات المحلية"
+                                    >
+                                      <Edit3 size={15} />
+                                    </button>
+                                    {activeDocument?.title && sec.title !== activeDocument.title && (
+                                      <button
+                                        onClick={() => sec.id && handleStandardizeSection(sec.id)}
+                                        className="inline-flex items-center gap-1 px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-xs font-black rounded-lg cursor-pointer transition-all shadow-2xs"
+                                        title={`توحيد وتحديث مسمى القسم محلياً ليصبح: "${activeDocument.title}" وتنظيف قوالبه`}
+                                      >
+                                        <span>🎯 توحيد المسمى مع اسم الكراسة: ({activeDocument.title})</span>
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* YouTube Video Controls & Action Buttons (Internal Player Only) */}
+                              <div className="flex items-center gap-2 flex-wrap no-print">
+                                {sec.youtubeUrl ? (
+                                  <div className="flex items-center gap-1.5 bg-red-50 hover:bg-red-100/90 border border-red-200 text-red-700 px-3 py-1.5 rounded-xl text-xs font-bold transition-all shadow-2xs">
+                                    <Video size={14} className="text-red-600" />
+                                    <button
+                                      type="button"
+                                      onClick={() => setExpandedVideoSecId(expandedVideoSecId === sec.id ? null : sec.id!)}
+                                      className="flex items-center gap-1.5 font-black text-red-950 hover:text-red-700 cursor-pointer"
+                                      title={expandedVideoSecId === sec.id ? "إخفاء مشغل الفيديو" : "تشغيل ومشاهدة فيديو الحلول داخل التطبيق"}
+                                    >
+                                      <Play size={11} className={expandedVideoSecId === sec.id ? "text-red-500" : "text-red-600 fill-red-600"} />
+                                      <span>{expandedVideoSecId === sec.id ? "إغلاق المشغل ✕" : "مشاهدة الفيديو داخل التطبيق 🎬"}</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingYoutubeSecId(sec.id!);
+                                        setYoutubeUrlValue(sec.youtubeUrl || '');
+                                      }}
+                                      className="p-1 hover:bg-red-200/80 rounded text-red-800 transition-colors cursor-pointer mr-1"
+                                      title="تعديل رابط فيديو YouTube"
+                                    >
+                                      <Edit3 size={13} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleUpdateSectionYoutube(sec.id!, '')}
+                                      className="p-1 hover:bg-red-200/80 rounded text-red-800 transition-colors cursor-pointer"
+                                      title="حذف رابط الفيديو"
+                                    >
+                                      <X size={13} />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingYoutubeSecId(sec.id!);
+                                      setYoutubeUrlValue('');
+                                    }}
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-red-700 bg-red-50 hover:bg-red-100/90 border border-red-200/90 rounded-xl transition-all shadow-2xs cursor-pointer"
+                                    title="إضافة رابط فيديو YouTube اختياري لحل وشرح هذه التمارين"
+                                  >
+                                    <Video size={14} className="text-red-600" />
+                                    <span>+ رابط YouTube 🎥</span>
+                                  </button>
+                                )}
+
+                                <button
+                                  onClick={() => {
+                                    const newEx: PracticeExercise = {
+                                      id: `ex_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                                      title: `التمرين ${exercises.length + 1}`,
+                                      questionText: '',
+                                      strategyText: '',
+                                      solutionText: '',
+                                      svgCode: ''
+                                    };
+                                    setEditingExModal({ sectionId: sec.id!, exercise: newEx });
+                                  }}
+                                  className="no-print inline-flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-black rounded-xl shadow-xs transition-all cursor-pointer"
+                                >
+                                  <Plus size={14} /> إضافة تمرين جديد ➕
+                                </button>
+                              </div>
                             </div>
+
+                            {/* YouTube Quick Input Form */}
+                            {editingYoutubeSecId === sec.id && (
+                              <div className="flex items-center gap-2 p-3 bg-red-50 border border-red-300 rounded-2xl w-full no-print shadow-xs animate-fadeIn">
+                                <Video size={16} className="text-red-600 shrink-0" />
+                                <div className="flex-1">
+                                  <input
+                                    type="url"
+                                    value={youtubeUrlValue}
+                                    onChange={(e) => setYoutubeUrlValue(e.target.value)}
+                                    className="w-full px-3 py-1.5 text-xs border border-red-200 rounded-xl focus:ring-2 focus:ring-red-500 bg-white font-medium text-gray-800 placeholder-gray-400 outline-none dir-ltr"
+                                    placeholder="https://www.youtube.com/watch?v=... أو https://youtu.be/..."
+                                    autoFocus
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') handleUpdateSectionYoutube(sec.id!, youtubeUrlValue);
+                                      if (e.key === 'Escape') setEditingYoutubeSecId(null);
+                                    }}
+                                  />
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUpdateSectionYoutube(sec.id!, youtubeUrlValue)}
+                                  className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-black cursor-pointer shrink-0 shadow-xs"
+                                >
+                                  حفظ الرابط ✓
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingYoutubeSecId(null)}
+                                  className="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-xs font-bold cursor-pointer shrink-0"
+                                >
+                                  إلغاء
+                                </button>
+                              </div>
+                            )}
+
+                            {/* Embedded YouTube Video Player (Collapsible) */}
+                            {expandedVideoSecId === sec.id && sec.youtubeUrl && extractYouTubeVideoId(sec.youtubeUrl) && (
+                              <div className="w-full bg-black rounded-2xl overflow-hidden shadow-lg border border-red-300 no-print animate-fadeIn my-2">
+                                <div className="flex items-center justify-between bg-zinc-900 text-white px-4 py-2 text-xs font-bold">
+                                  <span className="flex items-center gap-1.5">
+                                    <Video size={14} className="text-red-500" />
+                                    <span>مشغل فيديو الشرح المدمج: {sec.title || 'تمارين ومسائل'}</span>
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => setExpandedVideoSecId(null)}
+                                    className="text-gray-400 hover:text-white cursor-pointer"
+                                  >
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                                <div className="relative pt-[56.25%] w-full">
+                                  <iframe
+                                    className="absolute top-0 left-0 w-full h-full"
+                                    src={`https://www.youtube.com/embed/${extractYouTubeVideoId(sec.youtubeUrl)}?rel=0`}
+                                    title={`فيديو شرح: ${sec.title || 'تمارين ومسائل'}`}
+                                    frameBorder="0"
+                                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                                    allowFullScreen
+                                  />
+                                </div>
+                              </div>
+                            )}
 
                             {/* Exercises List */}
                             {exercises.length > 0 ? (

@@ -874,16 +874,11 @@ export async function syncDocumentHierarchy(
     const docMapping = await getSyncMapping('documents', docId);
 
     const docType = doc.type || 'lesson';
-    // قيد مهم: لا تُطبّق هذا المنطق على وثائق doc_type = 'exercise'
-    const lessonRemoteId = (docType !== 'exercise' && unitId && doc.topic && doc.topic.trim())
-      ? await resolveOrCreateLessonRemoteId(unitId, doc.topic.trim())
-      : null;
 
     const docPayload: any = {
       title: doc.title,
       doc_type: docType,
       unit_id: unitId,
-      lesson_id: lessonRemoteId,
       families_analysis: doc.familiesAnalysis || null,
       series_name: doc.seriesName || null,
       teacher_name: doc.teacherName || null,
@@ -1039,8 +1034,57 @@ export async function syncDocumentHierarchy(
         }
       }
 
+      // استخراج التحليلات والإضافات التربوية من analysis.additions إن وجدت لتعبئة الأعمدة المستقلة بدقة
+      const additions = (typeof sec.analysis === 'object' && Array.isArray(sec.analysis?.additions))
+        ? sec.analysis.additions
+        : [];
+
+      const getAdditionContent = (index: number, exactLabels: string[], fallbackKeywords: string[]): string | null => {
+        // 1. مطابقة دقيقة أولاً بالوسم الكامل (لتجنب التداخل بين "مطبات امتحانية" و"الدليل الامتحاني")
+        const itemByExact = additions.find((a: any) => 
+          a && typeof a.label === 'string' && exactLabels.some(l => a.label.trim() === l.trim() || a.label.includes(l))
+        );
+        // 2. مطابقة بالكلمات المفتاحية الفريدة
+        const itemByKeyword = !itemByExact ? additions.find((a: any) =>
+          a && typeof a.label === 'string' && fallbackKeywords.some(k => a.label.includes(k))
+        ) : null;
+        // 3. التراجع للترتيب الافتراضي index
+        const itemByIndex = additions[index];
+        const res = itemByExact || itemByKeyword || itemByIndex;
+        return (res && typeof res.content === 'string' && res.content.trim()) ? res.content.trim() : null;
+      };
+
+      const resolvedGuidance = sec.guidance || getAdditionContent(0, ['إرشادات ذكية للطالب', 'إرشادات ذكية', 'إرشادات'], ['إرشاد']);
+      const resolvedNotes = sec.notes || getAdditionContent(1, ['ملاحظات ونتائج هامة', 'ملاحظات ونتائج ذهبية', 'ملاحظات هامة'], ['ملاحظ']);
+      // traps: حصر البحث بكلمة "مطب" أو "مطبات" أو "تحذير" وتجنب كلمة "امتحان" العامة
+      const resolvedTraps = sec.traps || getAdditionContent(2, ['مطبات امتحانية وتحذيرات', 'مطبات امتحانية', 'مطب امتحاني - كُن حذراً'], ['مطب', 'مطبات', 'تحذير']);
+      // exam_guidance: حصر البحث بـ "الدليل الامتحاني" أو "دليل" أو "امتحان" ولكن استبعاد العناصر التي تحوي "مطب"
+      const examGuidanceFromAdditions = (() => {
+        const item = additions.find((a: any) => {
+          if (!a || typeof a.label !== 'string') return false;
+          const lbl = a.label;
+          // يجب أن يحوي دلالة الامتحان أو الدليل، وبشرط ألا يكون مطباً امتحانياً
+          return (lbl.includes('الدليل الامتحاني') || lbl.includes('الدليل المنهجي') || lbl.includes('طريقة ورود الفكرة')) 
+            && !lbl.includes('مطب');
+        });
+        if (item && typeof item.content === 'string' && item.content.trim()) return item.content.trim();
+        // تراجع بالفهرس 3 (موقع الدليل الامتحاني القياسي)
+        const itemAt3 = additions[3];
+        return (itemAt3 && typeof itemAt3.content === 'string' && itemAt3.content.trim()) ? itemAt3.content.trim() : null;
+      })();
+      const resolvedExamGuidance = sec.examGuidance || examGuidanceFromAdditions;
+
+      const resolvedExampleText = sec.exampleText || getAdditionContent(4, ['تطبيق عملي مكرّس (من الكتاب)', 'تطبيق عملي مكرّس للفهم', 'تطبيق عملي', 'تمرين تطبيقي'], ['تطبيق']);
+      const resolvedSolutionText = sec.solutionText || getAdditionContent(5, ['الحل النموذجي', 'الحل النموذجي المنهجي', 'خطوات الحل المنهجي النموذجي'], ['الحل النموذجي', 'حل نموذجي']);
+      const resolvedExtraExampleText = sec.extraExampleText || getAdditionContent(6, ['تمرين إضافي داعم', 'تمرين إضافي مكرّس ذو صياغة ذكية', 'تمرين إضافي'], ['إضافي']);
+      const resolvedExtraSolutionText = sec.extraSolutionText || getAdditionContent(7, ['حل التمرين الإضافي', 'الحل النموذجي للتمرين الإضافي'], ['حل التمرين الإضافي', 'حل إضافي']);
+
+      // كل صف في NewLessonSections هو درس كامل ومستقل بذاته تماماً بلا أي توارث
       const secPayload: any = {
         document_id: remoteDocId,
+        unit_id: unitId || null,
+        youtube_url: sec.youtubeUrl || null,
+        lesson_id: null,
         title: sec.title,
         content: sec.content,
         svg_code: sec.svgCode || null,
@@ -1052,34 +1096,37 @@ export async function syncDocumentHierarchy(
         practice_section_label: sec.practiceSectionLabel || null,
         practical_section_label: sec.practicalSectionLabel || null,
         is_practice_only: !!sec.isPracticeOnly,
-        guidance: sec.guidance || null,
-        notes: sec.notes || null,
-        traps: sec.traps || null,
-        exam_guidance: sec.examGuidance || null,
-        example_text: sec.exampleText || null,
-        solution_text: sec.solutionText || null,
-        extra_example_text: sec.extraExampleText || null,
-        extra_solution_text: sec.extraSolutionText || null,
+        guidance: resolvedGuidance || null,
+        notes: resolvedNotes || null,
+        traps: resolvedTraps || null,
+        exam_guidance: resolvedExamGuidance || null,
+        example_text: resolvedExampleText || null,
+        solution_text: resolvedSolutionText || null,
+        extra_example_text: resolvedExtraExampleText || null,
+        extra_solution_text: resolvedExtraSolutionText || null,
       };
 
+      const cleanSavePayload = { ...secPayload };
       if (remoteSecId) {
-        secPayload.id = remoteSecId;
-        const { data, error } = await supabase
-          .from('NewLessonSections')
-          .upsert(secPayload)
-          .select('id')
-          .single();
-        if (error) throw new Error(formatSupabaseErrorMessage('خطوة 3 [NewLessonSections]', error));
-        remoteSecId = data.id;
-      } else {
-        const { data, error } = await supabase
-          .from('NewLessonSections')
-          .insert(secPayload)
-          .select('id')
-          .single();
-        if (error) throw new Error(formatSupabaseErrorMessage('خطوة 3 [NewLessonSections]', error));
-        remoteSecId = data.id;
+        cleanSavePayload.id = remoteSecId;
       }
+
+      let saveResult = remoteSecId
+        ? await supabase.from('NewLessonSections').upsert(cleanSavePayload).select('id').single()
+        : await supabase.from('NewLessonSections').insert(cleanSavePayload).select('id').single();
+
+      // التوافق المرن: إذا كان جدول NewLessonSections لا يحوي بعد عمود unit_id أو youtube_url في قاعدة البيانات، نتجاوزهما تلقائياً
+      if (saveResult.error && saveResult.error.message && (saveResult.error.message.includes('unit_id') || saveResult.error.message.includes('youtube_url') || saveResult.error.code === 'PGRST204')) {
+        const fallbackPayload = { ...cleanSavePayload };
+        if (saveResult.error.message.includes('unit_id')) delete fallbackPayload.unit_id;
+        if (saveResult.error.message.includes('youtube_url')) delete fallbackPayload.youtube_url;
+        saveResult = remoteSecId
+          ? await supabase.from('NewLessonSections').upsert(fallbackPayload).select('id').single()
+          : await supabase.from('NewLessonSections').insert(fallbackPayload).select('id').single();
+      }
+
+      if (saveResult.error) throw new Error(formatSupabaseErrorMessage('خطوة 3 [NewLessonSections]', saveResult.error));
+      remoteSecId = saveResult.data.id;
 
       sectionRemoteMap.set(sec.id, remoteSecId!);
       await saveSyncMapping('lessonSections', sec.id, remoteSecId!, secHash, isPublished);
@@ -1306,14 +1353,55 @@ export async function syncDocumentHierarchy(
     onProgress?.('مزامنة محطات التمارين (NewExerciseStations)...', 84);
     const stations = await db.exerciseStations.toArray();
     const docStations = stations.filter(st => exerciseRemoteMap.has(String(st.exerciseId)));
+    const coveredLocalExIds = new Set(docStations.map(st => String(st.exerciseId)));
+
+    // دعم إضافي تلقائي: استخراج المحطات من guidedQuestions التابعة لتمارين الفقرات إن لم تكن مسجلة في db.exerciseStations
+    for (const sec of sortedSections) {
+      const allSecExercises = [...(sec.practiceExercises || []), ...(sec.practicalExercises || [])];
+      for (const ex of allSecExercises) {
+        if (!ex.id) continue;
+        const localExId = String(ex.id);
+        const remoteExId = exerciseRemoteMap.get(localExId);
+        if (!remoteExId || coveredLocalExIds.has(localExId)) continue;
+
+        if (Array.isArray(ex.guidedQuestions) && ex.guidedQuestions.length > 0) {
+          for (let gIdx = 0; gIdx < ex.guidedQuestions.length; gIdx++) {
+            const gq = ex.guidedQuestions[gIdx];
+            const order = gq.questionOrder || (gIdx + 1);
+            const choices = (gq.options || []).map((o, oIdx) => ({
+              id: o.id || `opt_${order}_${oIdx}`,
+              text: o.text || '',
+              isCorrect: !!o.isCorrect,
+              misconceptionDiagnosis: o.misconceptionDiagnosis || null
+            }));
+            const correctIndex = choices.findIndex(c => c.isCorrect);
+
+            docStations.push({
+              id: undefined,
+              exerciseId: ex.id as any,
+              stationOrder: order,
+              title: gq.title || `المحطة ${order}`,
+              questionText: gq.prompt || '',
+              choices,
+              correctChoiceIndex: correctIndex >= 0 ? correctIndex : 0,
+              hintText: gq.hint || null,
+              hintLevel1: gq.hintLevel1 || null,
+              hintLevel2: gq.hintLevel2 || null,
+              skipExplanation: gq.skipExplanation || null,
+              conceptMap: gq.conceptMap || null
+            } as any);
+          }
+          coveredLocalExIds.add(localExId);
+        }
+      }
+    }
 
     for (const st of docStations) {
-      if (!st.id) continue;
       const remoteExId = exerciseRemoteMap.get(String(st.exerciseId));
       if (!remoteExId) continue;
 
       const stHash = computeContentHash(st);
-      const stMapping = await getSyncMapping('exerciseStations', st.id);
+      const stMapping = st.id ? await getSyncMapping('exerciseStations', st.id) : null;
 
       const stPayload: any = {
         exercise_id: remoteExId,
