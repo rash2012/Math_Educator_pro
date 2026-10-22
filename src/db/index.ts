@@ -191,6 +191,7 @@ export interface Test {
   reviewReport?: string;
   reviewIssues?: any[];
   createdAt: number;
+  updatedAt?: number;
 }
 
 export interface QuestionBankItem {
@@ -244,6 +245,7 @@ export interface ExamSummary {
 
 export interface PastPaperQuestion {
   id: string;
+  orderTitle?: string;
   topic: string;
   type: 'mcq' | 'essay';
   question: string;
@@ -282,6 +284,7 @@ export interface UnitQuizQuestion {
   hint?: string;
   topic?: string;
   difficulty?: 'easy' | 'medium' | 'hard';
+  difficultyLevel?: number;
   validationScore?: number;
 }
 

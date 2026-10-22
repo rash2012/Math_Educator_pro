@@ -393,7 +393,7 @@ export const ExercisePrintSettingsPanel: React.FC<ExercisePrintSettingsProps> = 
             className="flex items-center gap-1.5 px-6 py-2.5 bg-gradient-to-l from-violet-600 to-indigo-600 text-white rounded-xl text-xs font-black shadow-md hover:opacity-95 transition-all cursor-pointer"
           >
             <Printer size={16} />
-            <span>بدء الطباعة / تصدير PDF الآن 🖨️</span>
+            <span>معاينة الطباعة / حفظ كـ PDF 🖨️</span>
           </button>
         </div>
       </div>

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { type PracticeExercise } from '../../db';
 import { MathRenderer } from '../MathRenderer';
 import { X, CheckCircle, Sparkles, Loader2, Check } from 'lucide-react';
-import { verifyPracticeExerciseSolutionAI } from '../../services/gemini';
+import { verifyPracticeExerciseSolutionAI, separateStrategyAndSolution } from '../../services/gemini';
 
 interface ExerciseVerifyModalProps {
   sectionId: number;
@@ -47,14 +47,19 @@ export const ExerciseVerifyModal: React.FC<ExerciseVerifyModalProps> = ({
 
   const handleSave = () => {
     if (!result) return;
-    const finalSolution = chosenVersion === 'short' && result.optimizedSolutionShort
+    const rawSolution = chosenVersion === 'short' && result.optimizedSolutionShort
       ? result.optimizedSolutionShort
       : result.optimizedSolution;
 
+    const { cleanSolution, cleanStrategy } = separateStrategyAndSolution(
+      rawSolution,
+      result.optimizedStrategy || exercise.strategyText
+    );
+
     const updated: PracticeExercise = {
       ...exercise,
-      solutionText: finalSolution,
-      strategyText: result.optimizedStrategy || exercise.strategyText
+      solutionText: cleanSolution,
+      strategyText: cleanStrategy || exercise.strategyText
     };
 
     onApply(updated);
@@ -67,7 +72,7 @@ export const ExerciseVerifyModal: React.FC<ExerciseVerifyModalProps> = ({
         <div className="bg-emerald-700 px-6 py-4 text-white flex justify-between items-center shrink-0">
           <h3 className="text-base md:text-lg font-black font-sans flex items-center gap-2">
             <CheckCircle size={20} />
-            <span>مراجعة وتدقيق وتنسيق الحل بالذكاء الاصطناعي ✨</span>
+            <span>تدقيق وتصحيح الحل عبر الوكيل المُحكّم المستقل (correctionAgent) ⚖️</span>
           </h3>
           <button 
             onClick={onClose}
@@ -90,7 +95,7 @@ export const ExerciseVerifyModal: React.FC<ExerciseVerifyModalProps> = ({
           {/* AI Focus prompt input */}
           <div className="space-y-1.5">
             <label className="block text-xs font-bold text-gray-700">
-              تعليمات إضافية للمدقق الذكي (اختياري):
+              تعليمات إضافية للمُحكّم المستقل (اختياري):
             </label>
             <input
               type="text"
@@ -110,8 +115,11 @@ export const ExerciseVerifyModal: React.FC<ExerciseVerifyModalProps> = ({
                 className="inline-flex items-center gap-2 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl text-xs font-black shadow-md transition-all cursor-pointer disabled:opacity-50"
               >
                 {isVerifying ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
-                <span>{isVerifying ? 'جاري فحص وتدقيق الخطوات بالذكاء الاصطناعي...' : 'بدء فحص وتدقيق الحل الآن 🔍'}</span>
+                <span>{isVerifying ? 'جاري التحكيم والتدقيق الرياضي عبر correctionAgent (نموذج مستقل)...' : 'بدء فحص وتدقيق الحل الآن 🔍'}</span>
               </button>
+              <p className="text-[11px] text-gray-400 mt-2 font-medium">
+                تستخدم هذه الأداة نموذج ذكاء اصطناعي تفكيري مستقل لفحص الخطوات 100% ومطابقة كود LaTeX ومعايير المنهاج السوري.
+              </p>
             </div>
           )}
 
@@ -122,9 +130,14 @@ export const ExerciseVerifyModal: React.FC<ExerciseVerifyModalProps> = ({
               <div className={`p-4 rounded-2xl border text-xs leading-relaxed ${
                 result.isCorrect ? 'bg-emerald-50 border-emerald-200 text-emerald-950' : 'bg-amber-50 border-amber-200 text-amber-950'
               }`}>
-                <div className="flex items-center gap-2 font-black mb-1.5">
-                  <span className={`w-2.5 h-2.5 rounded-full ${result.isCorrect ? 'bg-emerald-600' : 'bg-amber-500'}`} />
-                  <span>{result.isCorrect ? 'الحل صحيح ومتماسك رياضياً' : 'تم اكتشاف ملاحظات وتصحيحات رياضية'}</span>
+                <div className="flex items-center justify-between gap-2 font-black mb-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className={`w-2.5 h-2.5 rounded-full ${result.isCorrect ? 'bg-emerald-600' : 'bg-amber-500'}`} />
+                    <span>{result.isCorrect ? 'الحل صحيح ومتماسك رياضياً' : 'تم اكتشاف ملاحظات وتصحيحات رياضية'}</span>
+                  </div>
+                  <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2.5 py-0.5 rounded-full font-black border border-emerald-200">
+                    ⚖️ طبقة التحكيم: correctionAgent
+                  </span>
                 </div>
                 <p className="font-medium whitespace-pre-wrap">{result.notes}</p>
               </div>
@@ -151,9 +164,25 @@ export const ExerciseVerifyModal: React.FC<ExerciseVerifyModalProps> = ({
                 </div>
               )}
 
+              {/* Strategy Preview (In its dedicated container) */}
+              {result.optimizedStrategy && result.optimizedStrategy.trim() && (
+                <div className="p-4 bg-yellow-50/80 rounded-2xl border border-[#78350f] text-xs text-amber-950 leading-relaxed font-sans font-medium text-right w-full">
+                  <div className="flex items-center justify-between font-black text-amber-900 mb-1.5">
+                    <span className="flex items-center gap-1.5 text-xs">
+                      <span>💡</span>
+                      <span>فكرة واستراتيجية الحل (في الحاوية المخصصة لها):</span>
+                    </span>
+                    <span className="text-[10px] bg-amber-100 text-amber-800 px-2.5 py-0.5 rounded-full font-bold">
+                      فكرة عامة وموجزة
+                    </span>
+                  </div>
+                  <MathRenderer content={result.optimizedStrategy} />
+                </div>
+              )}
+
               {/* Solution Preview */}
               <div className="p-4 bg-[#f0fdf4] rounded-2xl border border-emerald-200 space-y-2">
-                <span className="text-xs font-black text-emerald-800 block">معاينة الحل المدقق والمنسق:</span>
+                <span className="text-xs font-black text-emerald-800 block">🔑 معاينة خطوات الحل المدقق والمنسق (في حاوية حل التمرين):</span>
                 <MathRenderer 
                   content={chosenVersion === 'short' && result.optimizedSolutionShort 
                     ? result.optimizedSolutionShort 

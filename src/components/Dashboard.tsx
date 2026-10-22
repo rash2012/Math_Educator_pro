@@ -11,6 +11,7 @@ import { UnifiedPageHeader } from './common/UnifiedPageHeader';
 import { UnifiedFilterBar } from './common/UnifiedFilterBar';
 import { SyncStatusBadge } from './SyncStatusBadge';
 import { UnitSyncIndicator } from './UnitSyncIndicator';
+import { LocalDatabaseIdBadge } from './common/LocalDatabaseIdBadge';
 
 interface DashboardProps {
   onUploadClick: () => void;
@@ -428,6 +429,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onUploadClick, onViewDoc, 
                     }`}>
                       {doc.type === 'lesson' ? 'ملخص درس' : doc.type === 'pdf' ? 'مرجع (PDF)' : 'كراسة تمارين'}
                     </span>
+                    <LocalDatabaseIdBadge id={doc.id} tableLabel="documents" compact={true} />
                     <UnitSyncIndicator docId={doc.id!} compact={true} />
                   </div>
 

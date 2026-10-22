@@ -43,6 +43,8 @@ import { SummaryManualEditor } from './SummaryManualEditor';
 import { AcademicMetadataFields } from './AcademicMetadataFields';
 import { DocumentMetadataModal } from './DocumentMetadataModal';
 import { UnifiedPageHeader } from './common/UnifiedPageHeader';
+import { SyncControlButton } from './SyncControlButton';
+import { LocalDatabaseIdBadge } from './common/LocalDatabaseIdBadge';
 
 export const ExamSummariesDashboard: React.FC = () => {
   // 1. Live Queries of DB
@@ -597,6 +599,9 @@ export const ExamSummariesDashboard: React.FC = () => {
                         <div className="flex items-start gap-2.5">
                           <FileText className={`mt-0.5 flex-shrink-0 ${isActive ? 'text-rose-600' : 'text-gray-400'}`} size={18} />
                           <div>
+                            <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                              <LocalDatabaseIdBadge id={sum.id} tableLabel="examSummaries" compact={true} />
+                            </div>
                             <h4 className="text-sm font-black text-gray-900 line-clamp-2 leading-relaxed group-hover:text-rose-600 transition-colors">
                               {sum.title}
                             </h4>
@@ -607,9 +612,22 @@ export const ExamSummariesDashboard: React.FC = () => {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
+                              setActiveSummaryId(sum.id ?? null);
+                              setTimeout(() => {
+                                window.print();
+                              }, 250);
+                            }}
+                            className="p-1.5 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all cursor-pointer"
+                            title="معاينة الطباعة / حفظ كـ PDF"
+                          >
+                            <Printer size={14} />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
                               setEditingSummary(sum);
                             }}
-                            className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all"
+                            className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all cursor-pointer"
                             title="تعديل البيانات الأكاديمية"
                           >
                             <Edit3 size={14} />
@@ -619,7 +637,7 @@ export const ExamSummariesDashboard: React.FC = () => {
                               e.stopPropagation();
                               handleDeleteSummary(sum.id!);
                             }}
-                            className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                            className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all cursor-pointer"
                             title="حذف الملخص"
                           >
                             <Trash2 size={14} />
@@ -734,13 +752,22 @@ export const ExamSummariesDashboard: React.FC = () => {
                   </div>
 
                   {/* Print and Export Buttons */}
-                  <div className="flex items-center gap-2 self-stretch md:self-auto">
+                  <div className="flex items-center gap-2 self-stretch md:self-auto flex-wrap">
+                    <LocalDatabaseIdBadge id={activeSummary.id} tableLabel="examSummaries" compact={false} />
+                    <SyncControlButton
+                      table="examSummaries"
+                      id={activeSummary.id!}
+                      data={activeSummary}
+                      showDraftOption={true}
+                      buttonText="مزامنة الملخص"
+                    />
                     <button
                       onClick={triggerNativePrint}
-                      className="flex items-center justify-center gap-2 bg-rose-600 hover:bg-rose-700 text-white font-black px-4 py-2.5 rounded-xl transition-all shadow-md active:scale-95 text-xs float-left"
+                      className="flex items-center justify-center gap-2 bg-rose-600 hover:bg-rose-700 text-white font-black px-4 py-2.5 rounded-xl transition-all shadow-md active:scale-95 text-xs float-left cursor-pointer"
+                      title="معاينة الطباعة / حفظ كـ PDF"
                     >
                       <Printer size={16} />
-                      تجهيز وبدء الطباعة الفورية
+                      معاينة الطباعة / حفظ كـ PDF 🖨️
                     </button>
                   </div>
                 </div>

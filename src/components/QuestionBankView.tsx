@@ -25,14 +25,21 @@ import {
   AlertCircle,
   FileText,
   Download,
-  Globe
+  Globe,
+  FileUp,
+  UploadCloud
 } from 'lucide-react';
+import { QuestionBankSync } from './QuestionBankSync';
+import { BankMCQClassifierModal } from './BankMCQClassifierModal';
 import { generateQuestionBank, generateSvgForTestQuestion, generateSolutionForQuestion, reviewQuestionBankItem, generateSummaryText, generateExpandedSummaryText, generateCondensedSummaryText, generateOnlyMCQs, generateOnlyEssayQuestions, auditReviewTableInSummary } from '../services/gemini';
+import { correctionAgent } from '../services/correctionAgent';
+import { ValidatorAgent } from '../services/multiAgent/validatorAgent';
 import { MathRenderer } from './MathRenderer';
 import { SmartMathEditor } from './SmartMathEditor';
 import { ConfirmDialog } from './ui/ConfirmDialog';
 import { AcademicMetadataFields } from './AcademicMetadataFields';
 import { DocumentMetadataModal } from './DocumentMetadataModal';
+import { ImportMCQModal } from './ImportMCQModal';
 import { DEFAULT_COUNTRY, DEFAULT_GRADE, DEFAULT_SUBJECT, DEFAULT_SERIES_NAME, DEFAULT_TEACHER_NAME, DEFAULT_TEACHER_ROLE } from '../constants/academicData';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -202,6 +209,9 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
   const [metaTeacherName, setMetaTeacherName] = useState(DEFAULT_TEACHER_NAME);
   const [metaTeacherRole, setMetaTeacherRole] = useState(DEFAULT_TEACHER_ROLE);
   const [isMetadataModalOpen, setIsMetadataModalOpen] = useState(false);
+  const [isImportMCQModalOpen, setIsImportMCQModalOpen] = useState(false);
+  const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
+  const [isClassifierModalOpen, setIsClassifierModalOpen] = useState(false);
 
   // Confirmation state
   const [confirmDeleteItem, setConfirmDeleteItem] = useState<string | null>(null);
@@ -326,6 +336,45 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
     setShowInjectTestQuestionsModal(false);
     
     alert(`تم حقن عدد ${newItems.length} من الأسئلة بنجاح إلى بنك الأسئلة الحالي! ✨`);
+  };
+
+  const handleImportMCQSuccess = async (importedItems: QuestionBankItem[]) => {
+    if (!importedItems || importedItems.length === 0) return;
+
+    const currentItems = bank.items || [];
+    const maxOrder = currentItems.length > 0 ? Math.max(...currentItems.map(i => i.order || 0)) : -1;
+
+    const newItemsWithOrder = importedItems.map((rawItem, idx) => {
+      const item = ValidatorAgent.validateAndRepairQuestionBankItem(rawItem);
+      return {
+        ...item,
+        order: maxOrder + 1 + idx,
+        type: 'mcq' as const
+      };
+    });
+
+    const updatedAllItems = [...currentItems, ...newItemsWithOrder];
+
+    setBank(prev => ({
+      ...prev,
+      items: updatedAllItems,
+      updatedAt: Date.now()
+    }));
+
+    // Auto-save to Dexie DB immediately
+    const currentBankId = bank.id || bankId;
+    if (currentBankId) {
+      try {
+        await db.questionBanks.update(currentBankId, {
+          items: updatedAllItems,
+          updatedAt: Date.now()
+        });
+      } catch (dbErr) {
+        console.warn('Could not auto-save to db:', dbErr);
+      }
+    }
+
+    alert(`تم بنجاح استيراد وإضافة ${importedItems.length} سؤالاً موضوعياً إلى بنك الأسئلة الحالي! ✨`);
   };
 
   // AI Proofread & Edit States
@@ -656,6 +705,17 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
         };
       });
 
+      // تشغيل الوكيل المحكّم والمدقق العلمي والرياضي (Layer 4) لتدقيق الصياغة وLaTeX والحلول قبل العرض
+      setCurrentAction('auditing_bank_items');
+      let auditedBankItems = itemsWithOrder;
+      try {
+        auditedBankItems = await correctionAgent.auditAndCorrectQuestionBankItems(itemsWithOrder, {
+          unitTitle: doc.unit || metaUnit || bank.unit
+        });
+      } catch (agentErr) {
+        console.warn('Critic agent fallback in generateQuestionBank:', agentErr);
+      }
+
       const titleText = `بنك أسئلة: ${doc.unit} - ${doc.subject}`;
       setMetaTitle(titleText);
       setMetaGrade(doc.grade);
@@ -671,7 +731,7 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
         unit: doc.unit || '',
         docId: selectedDocId,
         title: titleText,
-        items: itemsWithOrder,
+        items: auditedBankItems,
         summaryText: generatedSummary
       }));
 
@@ -689,17 +749,38 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
     setTempItem({ ...item });
   };
 
+  const [isAuditingTempItem, setIsAuditingTempItem] = useState(false);
+
+  const handleAuditEditingItem = async () => {
+    if (!tempItem) return;
+    setIsAuditingTempItem(true);
+    try {
+      const audited = await correctionAgent.auditAndCorrectQuestionBankItems([tempItem], {
+        unitTitle: metaUnit || bank.unit
+      });
+      if (Array.isArray(audited) && audited.length > 0) {
+        setTempItem(audited[0]);
+        alert('✨ تم تدقيق وإصلاح صياغة السؤال والحل ورموز LaTeX رياضياً ومنطقياً بواسطة Agent!');
+      }
+    } catch (e: any) {
+      console.warn('Audit temp item error:', e);
+      alert('تعذر التدقيق بـ Agent حالياً.');
+    } finally {
+      setIsAuditingTempItem(false);
+    }
+  };
+
   const saveEdit = () => {
     if (!tempItem) return;
     const originalItem = bank.items?.find(item => item.id === tempItem.id);
     const resolvedType = tempItem.type || originalItem?.type || (isMCQItem(tempItem) ? 'mcq' : 'essay');
-    const updatedItem = {
+    const cleanedItem = ValidatorAgent.validateAndRepairQuestionBankItem({
       ...tempItem,
       type: resolvedType
-    };
+    });
     setBank(prev => ({
       ...prev,
-      items: prev.items?.map(item => item.id === tempItem.id ? updatedItem : item) || []
+      items: prev.items?.map(item => item.id === tempItem.id ? cleanedItem : item) || []
     }));
     setEditingItemId(null);
     setTempItem(null);
@@ -1011,11 +1092,21 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
            type: 'mcq'
          }));
 
+         // تشغيل الوكيل المحكّم والمدقق العلمي والرياضي لتدقيق الصياغة و LaTeX والحلول قبل العرض
+         let auditedMCQs = newItems;
+         try {
+           auditedMCQs = await correctionAgent.auditAndCorrectQuestionBankItems(newItems, {
+             unitTitle: doc.unit || metaUnit || bank.unit
+           });
+         } catch (agentErr) {
+           console.warn('Critic agent fallback in rebuildMCQsAI:', agentErr);
+         }
+
          setBank(prev => ({
            ...prev,
-           items: [...otherItems, ...newItems]
+           items: [...otherItems, ...auditedMCQs]
          }));
-         alert('تم مسح المرجع بنجاح وتوليد باقة جديدة من أسئلة خيار من متعدد!');
+         alert('تم مسح المرجع وتدقيق وصياغة باقة جديدة من أسئلة خيار من متعدد بنجاح بواسطة Agent!');
        } else {
          alert('لم يتم التمكن من توليد أسئلة خيار من متعدد حالياً. تأكد من توفر نصوص جيدة بالملف.');
        }
@@ -1052,11 +1143,21 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
            type: 'mcq'
          }));
 
+         // تشغيل الوكيل المحكّم والمدقق العلمي والرياضي لتدقيق الصياغة و LaTeX والحلول قبل العرض
+         let auditedAdditional = newItems;
+         try {
+           auditedAdditional = await correctionAgent.auditAndCorrectQuestionBankItems(newItems, {
+             unitTitle: doc.unit || metaUnit || bank.unit
+           });
+         } catch (agentErr) {
+           console.warn('Critic agent fallback in expandMCQsAI:', agentErr);
+         }
+
          setBank(prev => ({
            ...prev,
-           items: [...(prev.items || []), ...newItems]
+           items: [...(prev.items || []), ...auditedAdditional]
          }));
-         alert(`تم المسح الشامل للمرجع وإضافة عدد ${additional.length} من الأسئلة والخيارات الجديدة المتميزة باحتوائها الذكي!`);
+         alert(`تم المسح الشامل وتدقيق الأسئلة بالوكيل الذكي بنجاح؛ تم إضافة ${auditedAdditional.length} من الأسئلة والخيارات الجديدة!`);
        } else {
          alert('لم تتوفر أسئلة إضافية جديدة تتجنب الأسئلة المتوفرة حالياً.');
        }
@@ -1067,6 +1168,10 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
        setGenerating(false);
        setCurrentAction(null);
     }
+  };
+
+  const handleAIUnitScanAndGenerate = () => {
+    setIsClassifierModalOpen(true);
   };
 
   const rebuildEssayAI = async () => {
@@ -1097,11 +1202,21 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
            type: 'essay'
          }));
 
+         // تشغيل الوكيل المحكّم والمدقق العلمي لتدقيق الصياغة و LaTeX والحلول قبل العرض
+         let auditedEssays = newItems;
+         try {
+           auditedEssays = await correctionAgent.auditAndCorrectQuestionBankItems(newItems, {
+             unitTitle: doc.unit || metaUnit || bank.unit
+           });
+         } catch (agentErr) {
+           console.warn('Critic agent fallback in rebuildEssayAI:', agentErr);
+         }
+
          setBank(prev => ({
            ...prev,
-           items: [...otherItems, ...newItems]
+           items: [...otherItems, ...auditedEssays]
          }));
-         alert('تم مسح المرجع وتوليد باقة جديدة متدرجة الصعوبة لمهارات المسائل والتمارين المقالية الطويلة!');
+         alert('تم مسح المرجع وتدقيق وصياغة باقة جديدة من التمارين والمسائل المقالية بنجاح بواسطة Agent!');
        } else {
          alert('لم يتم استرجاع مسائل جديدة حالياً.');
        }
@@ -1138,11 +1253,21 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
            type: 'essay'
          }));
 
+         // تشغيل الوكيل المحكّم والمدقق العلمي لتدقيق الصياغة و LaTeX والحلول قبل العرض
+         let auditedEssays = newItems;
+         try {
+           auditedEssays = await correctionAgent.auditAndCorrectQuestionBankItems(newItems, {
+             unitTitle: doc.unit || metaUnit || bank.unit
+           });
+         } catch (agentErr) {
+           console.warn('Critic agent fallback in expandEssayAI:', agentErr);
+         }
+
          setBank(prev => ({
            ...prev,
-           items: [...(prev.items || []), ...newItems]
+           items: [...(prev.items || []), ...auditedEssays]
          }));
-         alert(`تم المسح الشامل وإيجاد أفكار غير مغطاة؛ تم إضافة ${additional.length} تمارين ومسائل مقالية جديدة ومعززة ومدروسة بنجاح!`);
+         alert(`تم المسح الشامل وتدقيق المسائل بالوكيل الذكي بنجاح؛ تم إضافة ${auditedEssays.length} مسائل جديدة!`);
        } else {
          alert('لم نجد مسائل جديدة، كافة مفاهيم المرجع مغطاة بمسائل كافية وسليمة.');
        }
@@ -1971,6 +2096,14 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
             تصدير JSON كامل
           </button>
           <button
+            onClick={() => setIsImportMCQModalOpen(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-teal-50 border border-teal-200 text-teal-800 hover:bg-teal-100 rounded-lg font-bold transition-all shadow-sm cursor-pointer"
+            title="استيراد أسئلة موضوعية (اختيار من متعدد) من ملف PDF أو Word (.docx / .doc)"
+          >
+            <FileUp size={18} className="text-teal-600" />
+            استيراد أسئلة (PDF / Word) 📄
+          </button>
+          <button
             onClick={() => setShowInjectTestQuestionsModal(true)}
             className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white hover:bg-purple-700 rounded-lg font-bold transition-all shadow-sm"
             title="حقن أسئلة (اختيار من متعدد ومقالية مع الحلول) مباشرة من اختبارات سابقة في هذه المنصة"
@@ -1980,21 +2113,60 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
           </button>
           <button
             onClick={printBank}
-            className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-700 font-bold hover:bg-gray-50 transition-all shadow-sm"
+            className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-black transition-all shadow-md cursor-pointer"
+            title="معاينة الطباعة وحفظ كـ PDF"
           >
             <Printer size={18} />
-            طباعة
+            معاينة الطباعة / حفظ كـ PDF 🖨️
           </button>
           <button
             onClick={handleSave}
             disabled={generating}
-            className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg font-bold hover:bg-emerald-700 transition-all shadow-sm disabled:opacity-50"
+            className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg font-bold hover:bg-emerald-700 transition-all shadow-sm disabled:opacity-50 cursor-pointer"
           >
             <Save size={18} />
             حفظ البنك
           </button>
+          <button
+            onClick={() => setIsClassifierModalOpen(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-bold transition-all shadow-sm cursor-pointer active:scale-95"
+            title="تصنيف أسئلة بنك الوحدة بالذكاء الاصطناعي بنظام النجوم (1-5) ومسح الوحدة"
+          >
+            <Sparkles size={18} />
+            <span>تصنيف AI (نجوم)</span>
+          </button>
+          <button
+            onClick={() => setIsSyncModalOpen(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold transition-all shadow-sm cursor-pointer active:scale-95"
+            title="مزامنة واعتماد أسئلة هذا البنك سحابياً في Supabase (NewQuestionBanks & NewQuestionBankItems)"
+          >
+            <UploadCloud size={18} />
+            <span>مزامنة سحابية</span>
+          </button>
         </div>
       </div>
+      
+      {isClassifierModalOpen && (
+        <BankMCQClassifierModal
+          unitName={bank.unit || metaUnit || ''}
+          bankTitle={bank.title || ''}
+          items={(bank.items || []) as QuestionBankItem[]}
+          isMCQItem={isMCQItem}
+          onClose={() => setIsClassifierModalOpen(false)}
+          onSaveItems={async (updatedItems) => {
+            setBank(prev => ({
+              ...prev,
+              items: updatedItems
+            }));
+            if (bank.id) {
+              await db.questionBanks.update(bank.id, {
+                items: updatedItems,
+                updatedAt: Date.now()
+              });
+            }
+          }}
+        />
+      )}
 
       {/* File Configuration, Printing, & JSON Tools Card */}
       {bank.items && bank.items.length > 0 && (
@@ -2213,11 +2385,19 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
                     )}
                   </div>
 
-                  {/* Export to Word Quick-button */}
+                  {/* Print and Export Quick-buttons */}
                   <div className="border-t pt-3 mt-1 space-y-2">
                     <button
+                      onClick={printBank}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-gradient-to-l from-amber-600 to-amber-700 font-extrabold hover:from-amber-700 hover:to-amber-800 text-white rounded-xl transition-all text-xs shadow-md cursor-pointer"
+                      title="معاينة الطباعة / حفظ كـ PDF"
+                    >
+                      <Printer size={15} />
+                      معاينة الطباعة / حفظ كـ PDF 🖨️
+                    </button>
+                    <button
                       onClick={exportToWord}
-                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 font-extrabold hover:bg-blue-700 text-white rounded-lg transition-all text-xs shadow-md shadow-blue-600/10"
+                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 font-extrabold hover:bg-blue-700 text-white rounded-lg transition-all text-xs shadow-md shadow-blue-600/10 cursor-pointer"
                     >
                       <FileText size={14} />
                       تصدير بنك الأسئلة بالكامل لـ Word (.doc)
@@ -2708,12 +2888,30 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
                 إضافة للأسئلة الموجودة
               </button>
               <button
+                onClick={() => setIsClassifierModalOpen(true)}
+                disabled={generating}
+                className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 text-white hover:from-violet-700 hover:to-indigo-700 font-extrabold rounded-xl text-xs transition-all h-10 shadow-md cursor-pointer animate-fade-in"
+                title="تحليل ومسح الوحدة النشطة، استكشاف الفخاخ والأخطاء الشائعة، وتوليد وتصنيف أسئلة موضوعية بدون تكرار"
+              >
+                <Sparkles size={14} className="text-amber-300" />
+                <span>🤖 مسح وتحليل الوحدة وتوليد متقدم (مع الفخاخ وبدون تكرار)</span>
+              </button>
+              <button
                 onClick={handleAddMCQManually}
                 disabled={generating}
                 className="flex items-center gap-1.5 px-4 py-2 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 font-extrabold rounded-xl text-xs transition-all h-10 animate-fade-in"
               >
                 <PlusCircle size={14} className="text-emerald-600" />
                 إضافة سؤال يدوياً
+              </button>
+              <button
+                onClick={() => setIsImportMCQModalOpen(true)}
+                disabled={generating}
+                className="flex items-center gap-1.5 px-4 py-2 bg-teal-50 text-teal-800 hover:bg-teal-100 border border-teal-200 font-extrabold rounded-xl text-xs transition-all h-10 cursor-pointer animate-fade-in"
+                title="استيراد أسئلة موضوعية (اختيار من متعدد) من ملف PDF أو Word"
+              >
+                <FileUp size={14} className="text-teal-600" />
+                استيراد من PDF / Word 📄
               </button>
             </div>
           </div>
@@ -3033,6 +3231,42 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
           </div>
         )}
       </AnimatePresence>
+
+      {/* Import MCQ from PDF / Word Modal */}
+      <ImportMCQModal
+        isOpen={isImportMCQModalOpen}
+        onClose={() => setIsImportMCQModalOpen(false)}
+        bankTitle={metaTitle || bank.title}
+        unitName={metaUnit || bank.unit}
+        grade={metaGrade || bank.grade}
+        subject={metaSubject || bank.subject}
+        part={metaPart || bank.part}
+        currentItemsCount={bank.items?.length || 0}
+        onImportSuccess={handleImportMCQSuccess}
+      />
+
+      {/* Cloud Sync Modal */}
+      {isSyncModalOpen && (
+        <QuestionBankSync
+          initialBank={{
+            ...bank,
+            items: bank.items || [],
+            title: metaTitle || bank.title,
+            country: metaCountry || bank.country,
+            grade: metaGrade || bank.grade,
+            subject: metaSubject || bank.subject,
+            part: metaPart || bank.part,
+            unit: metaUnit || bank.unit,
+            topic: metaTopic || bank.topic,
+            seriesName: metaSeriesName || bank.seriesName,
+            teacherName: metaTeacherName || bank.teacherName,
+            teacherRole: metaTeacherRole || bank.teacherRole,
+            createdAt: bank.createdAt || Date.now(),
+            updatedAt: bank.updatedAt || Date.now(),
+          }}
+          onClose={() => setIsSyncModalOpen(false)}
+        />
+      )}
       </div>
 
       {/* Print-only CSS */}
@@ -3416,6 +3650,8 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
             )}
           </div>
           )}
+
+
 
           <div className="mt-20 pt-8 border-t border-gray-300 text-center text-xs text-gray-500">
             تم إنشاء بنك الأسئلة التدريبية بواسطة منصة التعلم الذكي

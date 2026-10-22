@@ -34,6 +34,10 @@ import { CustomDialog } from './ui/CustomDialog';
 import { UnitComprehensiveReviewSection } from './UnitComprehensiveReviewSection';
 import { UnitQuizSection } from './UnitQuizSection';
 import { UnitMindMapSection } from './UnitMindMapSection';
+import { UnitReviewPrintPreviewModal } from './UnitReviewPrintPreviewModal';
+import { UnitQuizPrintPreviewModal } from './UnitQuizPrintPreviewModal';
+import { UnitMindMapPrintPreviewModal } from './UnitMindMapPrintPreviewModal';
+import type { UnitComprehensiveReview, UnitQuiz, UnitMindMap } from '../db';
 
 interface LessonViewProps {
   docId: number;
@@ -90,8 +94,52 @@ export const LessonView: React.FC<LessonViewProps> = ({ docId, onBack }) => {
     part: '', 
     unit: ''
   });
-  const [solvingExercises, setSolvingExercises] = useState<number[]>([]);
   const [isFormatting, setIsFormatting] = useState(false);
+  const [solvingExercises, setSolvingExercises] = useState<number[]>([]);
+
+  // Supplements Optional Print States (Defaulted to false: NOT printed within unit explanation unless explicitly enabled)
+  const [printIncludeReview, setPrintIncludeReview] = useState(false);
+  const [printIncludeQuiz, setPrintIncludeQuiz] = useState(false);
+  const [printIncludeMindMap, setPrintIncludeMindMap] = useState(false);
+  const [showPrintOptions, setShowPrintOptions] = useState(false);
+
+  // Standalone print preview modal states
+  const [isReviewPrintOpen, setIsReviewPrintOpen] = useState(false);
+  const [isQuizPrintOpen, setIsQuizPrintOpen] = useState(false);
+  const [isMindMapPrintOpen, setIsMindMapPrintOpen] = useState(false);
+  const [reviewData, setReviewData] = useState<UnitComprehensiveReview | null>(null);
+  const [quizData, setQuizData] = useState<UnitQuiz | null>(null);
+  const [mindMapData, setMindMapData] = useState<UnitMindMap | null>(null);
+
+  const handleOpenReviewPrint = async () => {
+    const r = await db.unitComprehensiveReviews.where({ docId }).first();
+    if (r) {
+      setReviewData(r);
+      setIsReviewPrintOpen(true);
+    } else {
+      showAlert('تنبيه', 'لم يتم إنشاء مراجعة شاملة لهذه الوحدة بعد. يمكنك إنشاؤها وتوليدها من قسم مراجعة الوحدة بالأسفل.');
+    }
+  };
+
+  const handleOpenQuizPrint = async () => {
+    const q = await db.unitQuizzes.where({ docId }).first();
+    if (q) {
+      setQuizData(q);
+      setIsQuizPrintOpen(true);
+    } else {
+      showAlert('تنبيه', 'لم يتم إنشاء اختبار شامل لهذه الوحدة بعد. يمكنك إنشاؤه وتوليده من قسم اختبار الوحدة بالأسفل.');
+    }
+  };
+
+  const handleOpenMindMapPrint = async () => {
+    const m = await db.unitMindMaps.where({ docId }).first();
+    if (m) {
+      setMindMapData(m);
+      setIsMindMapPrintOpen(true);
+    } else {
+      showAlert('تنبيه', 'لم يتم إنشاء خريطة ذهنية لهذه الوحدة بعد. يمكنك إنشاؤها وتوليدها من قسم الخريطة الذهنية بالأسفل.');
+    }
+  };
 
   const defaultTitles = ['تعريف', 'مبرهنة', 'نظرية', 'نتيجة', 'مثال محلول', 'مثال', 'ملاحظة', 'نص عام'];
   const [allTitles, setAllTitles] = useState<string[]>(defaultTitles);
@@ -384,23 +432,119 @@ export const LessonView: React.FC<LessonViewProps> = ({ docId, onBack }) => {
           العودة للمكتبة
         </button>
         
-        <div className="flex gap-4">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           <button 
             onClick={handleApplyFormatting} 
             disabled={isFormatting}
-            className="flex items-center gap-2 px-4 py-2 bg-white text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 py-2 bg-white text-gray-700 border border-gray-200 rounded-xl hover:bg-gray-50 transition-colors disabled:opacity-50 text-xs font-bold shadow-2xs"
             title="تنسيق الفقرات والترقيم بشكل دائم"
           >
-            {isFormatting ? <Loader2 size={20} className="animate-spin" /> : <Type size={20} />}
-            تنسيق
+            {isFormatting ? <Loader2 size={16} className="animate-spin" /> : <Type size={16} />}
+            <span>تنسيق</span>
           </button>
-          <button onClick={() => setIsEditingMetadata(true)} className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
-            <Settings size={20} />
+          
+          <button onClick={() => setIsEditingMetadata(true)} className="p-2 text-gray-600 hover:bg-gray-100 rounded-xl transition-colors border border-gray-200 bg-white shadow-2xs" title="تعديل بيانات الدرس">
+            <Settings size={16} />
           </button>
-          <button onClick={exportToPdf} className="flex items-center gap-2 bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700 transition-colors">
-            <Printer size={20} />
-            طباعة الدرس
-          </button>
+
+          {/* Standalone Supplement Print Quick Buttons */}
+          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
+            <button
+              type="button"
+              onClick={handleOpenReviewPrint}
+              className="px-2.5 py-1.5 bg-white hover:bg-violet-50 text-violet-800 rounded-lg text-[11px] font-black border border-violet-200 shadow-2xs transition-all cursor-pointer flex items-center gap-1"
+              title="طباعة مراجعة الوحدة الشاملة كملف PDF مستقل"
+            >
+              <BookOpen size={13} className="text-violet-600" />
+              <span>طباعة المراجعة (مستقلة)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleOpenQuizPrint}
+              className="px-2.5 py-1.5 bg-white hover:bg-indigo-50 text-indigo-800 rounded-lg text-[11px] font-black border border-indigo-200 shadow-2xs transition-all cursor-pointer flex items-center gap-1"
+              title="طباعة اختبار الوحدة كملف PDF مستقل"
+            >
+              <Target size={13} className="text-indigo-600" />
+              <span>طباعة الاختبار (مستقل)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleOpenMindMapPrint}
+              className="px-2.5 py-1.5 bg-white hover:bg-amber-50 text-amber-800 rounded-lg text-[11px] font-black border border-amber-200 shadow-2xs transition-all cursor-pointer flex items-center gap-1"
+              title="طباعة الخريطة الذهنية كملف PDF مستقل"
+            >
+              <Sparkles size={13} className="text-amber-600" />
+              <span>طباعة الخريطة (مستقلة)</span>
+            </button>
+          </div>
+
+          {/* Main Lesson Print Button & Optional Supplements Toggler */}
+          <div className="relative">
+            <div className="flex items-center">
+              <button 
+                onClick={exportToPdf} 
+                className="flex items-center gap-2 bg-gradient-to-r from-purple-600 to-indigo-600 text-white px-3.5 py-2 rounded-r-xl hover:from-purple-700 hover:to-indigo-700 transition-all font-black text-xs sm:text-sm shadow-md cursor-pointer"
+                title="معاينة طباعة شرح الدرس الحالي"
+              >
+                <Printer size={16} />
+                <span>طباعة شرح الدرس 🖨️</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowPrintOptions(!showPrintOptions)}
+                className="bg-indigo-700 hover:bg-indigo-800 text-white px-2 py-2 rounded-l-xl transition-all cursor-pointer border-r border-indigo-500/40"
+                title="تخصيص ملحقات الطباعة (اختياري)"
+              >
+                <ChevronDown size={16} className={`transition-transform ${showPrintOptions ? 'rotate-180' : ''}`} />
+              </button>
+            </div>
+
+            {/* Optional Supplements Dropdown */}
+            {showPrintOptions && (
+              <div className="absolute left-0 mt-2 w-72 bg-white rounded-2xl shadow-xl border border-slate-200 p-3 z-30 space-y-2 text-right animate-scale-up">
+                <div className="text-[11px] font-black text-slate-800 border-b border-slate-100 pb-1.5 flex items-center justify-between">
+                  <span>تضمين الملحقات مع شرح الدرس:</span>
+                  <span className="text-[10px] text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded font-bold">اختياري</span>
+                </div>
+                
+                <label className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-slate-50 cursor-pointer text-xs font-bold text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={printIncludeReview}
+                    onChange={(e) => setPrintIncludeReview(e.target.checked)}
+                    className="w-4 h-4 text-purple-600 rounded border-slate-300 focus:ring-purple-500 cursor-pointer"
+                  />
+                  <span>مراجعة الوحدة الشاملة 📖</span>
+                </label>
+
+                <label className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-slate-50 cursor-pointer text-xs font-bold text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={printIncludeQuiz}
+                    onChange={(e) => setPrintIncludeQuiz(e.target.checked)}
+                    className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                  />
+                  <span>اختبار الوحدة الشامل 🎯</span>
+                </label>
+
+                <label className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-slate-50 cursor-pointer text-xs font-bold text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={printIncludeMindMap}
+                    onChange={(e) => setPrintIncludeMindMap(e.target.checked)}
+                    className="w-4 h-4 text-amber-600 rounded border-slate-300 focus:ring-amber-500 cursor-pointer"
+                  />
+                  <span>الخريطة الذهنية البصرية 🧭</span>
+                </label>
+
+                <p className="text-[10px] text-slate-400 pt-1 border-t border-slate-100 leading-tight">
+                  * افتراضياً يُطبع شرح الدرس فقط بدون الملحقات، وتُطبع الملحقات بشكل مستقل بأزرارها المخصصة.
+                </p>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -767,7 +911,7 @@ export const LessonView: React.FC<LessonViewProps> = ({ docId, onBack }) => {
 
         {/* Unit Comprehensive Review Section (مراجعة شاملة للوحدة) */}
         {document && sections && (
-          <div className="mt-12 page-break-before">
+          <div className={`mt-12 page-break-before ${!printIncludeReview ? 'no-print' : ''}`}>
             <UnitComprehensiveReviewSection
               document={document}
               sections={sections}
@@ -781,7 +925,7 @@ export const LessonView: React.FC<LessonViewProps> = ({ docId, onBack }) => {
 
         {/* Unit Quiz Section */}
         {document && sections && (
-          <div className="mt-12 no-print page-break-before">
+          <div className={`mt-12 page-break-before ${!printIncludeQuiz ? 'no-print' : ''}`}>
             <UnitQuizSection
               document={document}
               sections={sections}
@@ -795,7 +939,7 @@ export const LessonView: React.FC<LessonViewProps> = ({ docId, onBack }) => {
 
         {/* Unit Mind Map Section */}
         {document && sections && (
-          <div className="mt-12 no-print page-break-before">
+          <div className={`mt-12 page-break-before ${!printIncludeMindMap ? 'no-print' : ''}`}>
             <UnitMindMapSection
               document={document}
               sections={sections}
@@ -815,6 +959,34 @@ export const LessonView: React.FC<LessonViewProps> = ({ docId, onBack }) => {
           </div>
         </div>
       </div>
+
+      {/* Standalone Supplement Print Preview Modals */}
+      {isReviewPrintOpen && reviewData && document && (
+        <UnitReviewPrintPreviewModal
+          isOpen={isReviewPrintOpen}
+          onClose={() => setIsReviewPrintOpen(false)}
+          document={document}
+          review={reviewData}
+        />
+      )}
+
+      {isQuizPrintOpen && quizData && document && (
+        <UnitQuizPrintPreviewModal
+          isOpen={isQuizPrintOpen}
+          onClose={() => setIsQuizPrintOpen(false)}
+          document={document}
+          quiz={quizData}
+        />
+      )}
+
+      {isMindMapPrintOpen && mindMapData && document && (
+        <UnitMindMapPrintPreviewModal
+          isOpen={isMindMapPrintOpen}
+          onClose={() => setIsMindMapPrintOpen(false)}
+          document={document}
+          mindMap={mindMapData}
+        />
+      )}
 
       <CustomDialog
         isOpen={dialogConfig.isOpen}

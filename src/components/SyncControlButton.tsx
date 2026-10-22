@@ -15,6 +15,7 @@ import {
   type SyncResult
 } from '../services/supabaseSync';
 import { getSupabaseConfig } from '../services/supabaseClient';
+import { SupabaseConfigModal } from './common/SupabaseConfigModal';
 
 export type SyncableTable =
   | 'documents'
@@ -53,6 +54,7 @@ export const SyncControlButton: React.FC<SyncControlButtonProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [isConfigured, setIsConfigured] = useState(true);
+  const [showConfigModal, setShowConfigModal] = useState(false);
 
   const checkStatus = async () => {
     try {
@@ -77,6 +79,12 @@ export const SyncControlButton: React.FC<SyncControlButtonProps> = ({
 
   const executeSync = async (isDraft: boolean = false) => {
     if (isSyncing || !id) return;
+
+    const config = getSupabaseConfig();
+    if (!config.url || !config.anonKey) {
+      setShowConfigModal(true);
+      return;
+    }
 
     setIsSyncing(true);
     setErrorMessage(null);
@@ -122,15 +130,15 @@ export const SyncControlButton: React.FC<SyncControlButtonProps> = ({
         setSuccessMessage(result.message || 'تمت المزامنة والاعتماد بنجاح!');
         await checkStatus();
         onSyncComplete?.(result);
-        setTimeout(() => setSuccessMessage(null), 4000);
+        setTimeout(() => setSuccessMessage(null), 6000);
       } else {
         setErrorMessage(result.message || 'تعذرت المزامنة');
-        setTimeout(() => setErrorMessage(null), 5000);
+        setTimeout(() => setErrorMessage(null), 8000);
       }
     } catch (err: any) {
       const msg = err.message || 'حدث خطأ أثناء المزامنة';
       setErrorMessage(msg);
-      setTimeout(() => setErrorMessage(null), 5000);
+      setTimeout(() => setErrorMessage(null), 8000);
     } finally {
       setIsSyncing(false);
     }
@@ -138,19 +146,24 @@ export const SyncControlButton: React.FC<SyncControlButtonProps> = ({
 
   if (!isConfigured) {
     return (
-      <div className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-100 text-slate-500 border border-slate-200 ${className}`}>
-        <Cloud size={14} className="text-slate-400" />
-        <span>مخزن محلياً (Supabase غير مهيأ)</span>
-      </div>
-    );
-  }
-
-  if (table === 'questionBanks') {
-    return (
-      <div className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-100 text-slate-600 border border-slate-200 ${className}`}>
-        <span className="w-2 h-2 rounded-full bg-slate-400"></span>
-        <span>قسم بنك الأسئلة مستثنى حالياً من المزامنة (قيد إعادة الهيكلة)</span>
-      </div>
+      <>
+        <button
+          type="button"
+          onClick={() => setShowConfigModal(true)}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 transition-colors cursor-pointer shadow-2xs ${className}`}
+          title="انقر لضبط رابط ومفتاح مشروع Supabase لتفعيل المزامنة السحابية"
+        >
+          <Cloud size={14} className="text-amber-600" />
+          <span>مخزن محلياً (انقر لضبط اتصال Supabase ⚙️)</span>
+        </button>
+        <SupabaseConfigModal
+          isOpen={showConfigModal}
+          onClose={() => setShowConfigModal(false)}
+          onSaved={() => {
+            checkStatus();
+          }}
+        />
+      </>
     );
   }
 
@@ -293,6 +306,14 @@ export const SyncControlButton: React.FC<SyncControlButtonProps> = ({
           <span>{errorMessage}</span>
         </div>
       )}
+      {/* Supabase Connection Modal */}
+      <SupabaseConfigModal
+        isOpen={showConfigModal}
+        onClose={() => setShowConfigModal(false)}
+        onSaved={() => {
+          checkStatus();
+        }}
+      />
     </div>
   );
 };

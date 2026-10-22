@@ -6,6 +6,7 @@
 
 import { AgentActionLog, ValidationResult } from './types';
 import { ValidatorAgent } from './validatorAgent';
+import { IndependentArbiterAgent } from './arbiterAgent';
 import { getCurriculumContextForPrompt } from './curriculumAgent';
 import { UNIFIED_THEME } from './visualIdentityHarmonizer';
 
@@ -19,7 +20,7 @@ export class MultiAgentOrchestrator {
   /**
    * Log an internal action across layers
    */
-  private logAction(
+  public logAction(
     layer: AgentActionLog['layer'],
     action: string,
     details?: string,
@@ -187,6 +188,108 @@ ${userPrompt}
       validationResults,
       averageScore,
     };
+  }
+
+  /**
+   * Async Deep Arbitration for Mathematical Solutions via Independent Model
+   */
+  public async auditAndCorrectSolutionAsync(
+    solutionText: string,
+    options?: {
+      originalQuestion?: string;
+      context?: string;
+      generatorModelUsed?: string;
+    }
+  ): Promise<{ text: string; wasModified: boolean; issues: any[] }> {
+    this.logAction('validator', `بدء التدقيق والتحكيم الرياضي العميق للحل عبر النموذج المستقل${options?.context ? ` (${options.context})` : ''}`);
+    const result = await IndependentArbiterAgent.auditAndCorrectSolution(solutionText, options);
+    this.logAction(
+      'validator',
+      result.wasModified ? 'تم تحكيم وتصحيح الحل الرياضي بنجاح بواسطة الوكيل المستقل' : 'تم التحقق من صحة الحل الرياضي واعتماده بنجاح',
+      undefined,
+      'success'
+    );
+    return result;
+  }
+
+  /**
+   * Async Deep Arbitration for Lesson Content via Independent Model
+   */
+  public async auditAndCorrectLessonAsync(
+    lessonData: any,
+    options?: {
+      context?: string;
+      generatorModelUsed?: string;
+    }
+  ): Promise<any> {
+    this.logAction('validator', `بدء التحكيم المستقل للدرس النظري${options?.context ? ` (${options.context})` : ''}`);
+    const audited = await IndependentArbiterAgent.auditAndCorrectLessonData(lessonData, options);
+    this.logAction('validator', 'اكتمل تحكيم وتدقيق الدرس النظري بنجاح', undefined, 'success');
+    return audited;
+  }
+
+  /**
+   * Async Deep Arbitration for Practice Exercises ("تدرّب")
+   */
+  public async auditAndCorrectPracticeExercisesAsync(
+    exercises: any[],
+    options?: {
+      context?: string;
+      generatorModelUsed?: string;
+    }
+  ): Promise<any[]> {
+    this.logAction('validator', `بدء تحكيم تمارين تدرّب (${exercises?.length || 0} تمرين) عبر النموذج المستقل`);
+    const audited = await IndependentArbiterAgent.auditAndCorrectPracticeExercises(exercises, options);
+    this.logAction('validator', 'تم الانتهاء من تحكيم وتدقيق تمارين تدرّب واعتمادها', undefined, 'success');
+    return audited;
+  }
+
+  /**
+   * Async Deep Arbitration for Unit Exercises ("تمرينات ومسائل الوحدة")
+   */
+  public async auditAndCorrectUnitExercisesAsync(
+    exercises: any[],
+    options?: {
+      context?: string;
+      generatorModelUsed?: string;
+    }
+  ): Promise<any[]> {
+    this.logAction('validator', `بدء تحكيم تمرينات ومسائل الوحدة (${exercises?.length || 0} مسألة)`);
+    const audited = await IndependentArbiterAgent.auditAndCorrectUnitExercises(exercises, options);
+    this.logAction('validator', 'تم الانتهاء من تحكيم مسائل وتمرينات الوحدة واعتمادها', undefined, 'success');
+    return audited;
+  }
+
+  /**
+   * Async Deep Arbitration for Comprehensive Unit Review
+   */
+  public async auditAndCorrectUnitReviewAsync(
+    reviewData: any,
+    options?: {
+      context?: string;
+      generatorModelUsed?: string;
+    }
+  ): Promise<any> {
+    this.logAction('validator', 'بدء تحكيم المراجعة الشاملة للوحدة عبر النموذج المستقل');
+    const audited = await IndependentArbiterAgent.auditAndCorrectUnitReview(reviewData, options);
+    this.logAction('validator', 'تم الانتهاء من تحكيم مراجعة الوحدة واعتمادها', undefined, 'success');
+    return audited;
+  }
+
+  /**
+   * Async Deep Arbitration for Questions / Quizzes
+   */
+  public async auditAndCorrectQuestionSetAsync(
+    questions: any[],
+    options?: {
+      context?: string;
+      generatorModelUsed?: string;
+    }
+  ): Promise<any[]> {
+    this.logAction('validator', `بدء تحكيم مجموعة الأسئلة والاختبار (${questions?.length || 0} سؤال)`);
+    const audited = await IndependentArbiterAgent.auditAndCorrectQuestionSet(questions, options);
+    this.logAction('validator', 'تم الانتهاء من تحكيم وتدقيق الأسئلة واعتمادها', undefined, 'success');
+    return audited;
   }
 }
 

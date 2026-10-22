@@ -6,4 +6,6 @@ export * from './types';
 export * from './visualIdentityHarmonizer';
 export * from './curriculumAgent';
 export * from './validatorAgent';
+export * from './arbiterAgent';
 export * from './orchestrator';
+export { correctionAgent } from '../correctionAgent';

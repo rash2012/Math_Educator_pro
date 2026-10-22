@@ -60,8 +60,54 @@ export const SummaryManualEditor: React.FC<SummaryManualEditorProps> = ({
     onChange(localText);
   };
 
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const wrapOrInsertTag = (prefix: string, suffix: string, defaultPlaceholder: string) => {
+    const el = textareaRef.current;
+    if (el) {
+      const start = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? el.value.length;
+      const selected = localText.substring(start, end);
+      const textToWrap = selected || defaultPlaceholder;
+      const inserted = prefix + textToWrap + suffix;
+      const newVal = localText.substring(0, start) + inserted + localText.substring(end);
+      setLocalText(newVal);
+
+      setTimeout(() => {
+        if (textareaRef.current) {
+          textareaRef.current.focus();
+          const cursorStart = start + prefix.length;
+          const cursorEnd = cursorStart + textToWrap.length;
+          textareaRef.current.setSelectionRange(cursorStart, cursorEnd);
+        }
+      }, 0);
+    } else {
+      setLocalText(prev => prev + prefix + defaultPlaceholder + suffix);
+    }
+  };
+
+  const insertSymbol = (sym: string) => {
+    const el = textareaRef.current;
+    if (el) {
+      const start = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? el.value.length;
+      const newVal = localText.substring(0, start) + sym + localText.substring(end);
+      setLocalText(newVal);
+
+      setTimeout(() => {
+        if (textareaRef.current) {
+          textareaRef.current.focus();
+          const nextPos = start + sym.length;
+          textareaRef.current.setSelectionRange(nextPos, nextPos);
+        }
+      }, 0);
+    } else {
+      setLocalText(prev => prev + sym);
+    }
+  };
+
   return (
-    <div className="h-full flex flex-col gap-4">
+    <div className="h-full flex flex-col gap-3">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 bg-white p-3 rounded-xl border border-gray-150">
         <div className="flex flex-wrap items-center gap-4">
           <span className="text-xs font-black text-gray-700">
@@ -110,9 +156,107 @@ export const SummaryManualEditor: React.FC<SummaryManualEditorProps> = ({
         </button>
       </div>
 
+      {/* Formatting & Tags Quick Toolbar */}
+      <div className="flex flex-wrap items-center gap-2 p-2 bg-slate-50 border border-slate-200 rounded-xl">
+        {/* Soft Violet Highlight **عبارة** */}
+        <button
+          type="button"
+          onClick={() => wrapOrInsertTag('**', '**', 'عبارة هامة')}
+          className="h-7 px-2.5 flex items-center gap-1 bg-[#ede9fe] hover:bg-[#ddd6fe] text-[#4c1d95] border border-violet-300 rounded-lg shadow-2xs text-xs font-black transition-all cursor-pointer shrink-0"
+          title="الوسم **عبارة**: تظليل كلمات وعبارات هامة ومفتاحية بلون بنفسجي ناعم (كما يظلل الطالب أثناء الدراسة - ولا يستخدم لعناوين الفقرات)"
+        >
+          <span>🖍️</span>
+          <span>**تظليل عبارة**</span>
+        </button>
+
+        {/* Red Main Heading <main-title> */}
+        <button
+          type="button"
+          onClick={() => wrapOrInsertTag('<main-title>', '</main-title>', 'العنوان الرئيسي')}
+          className="h-7 px-2.5 flex items-center gap-1.5 bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 rounded-lg shadow-2xs text-xs font-black transition-all cursor-pointer shrink-0"
+          title="وسم أحمر للعناوين الرئيسية: <main-title>العنوان الرئيسي</main-title>"
+        >
+          <span className="w-2.5 h-2.5 rounded-full bg-red-600"></span>
+          <span>عنوان رئيسي (أحمر)</span>
+        </button>
+
+        {/* Blue Subheading <sub-title> */}
+        <button
+          type="button"
+          onClick={() => wrapOrInsertTag('<sub-title>', '</sub-title>', 'العنوان الفرعي')}
+          className="h-7 px-2.5 flex items-center gap-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-300 rounded-lg shadow-2xs text-xs font-black transition-all cursor-pointer shrink-0"
+          title="وسم أزرق للعناوين الفرعية: <sub-title>العنوان الفرعي</sub-title>"
+        >
+          <span className="w-2.5 h-2.5 rounded-full bg-blue-600"></span>
+          <span>عنوان فرعي (أزرق)</span>
+        </button>
+
+        {/* Formula Red Box ***قانون*** */}
+        <button
+          type="button"
+          onClick={() => wrapOrInsertTag('***دستور: $', '$***', 'قانون أو مبرهنة')}
+          className="h-7 px-2 flex items-center gap-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-lg shadow-2xs text-xs font-bold transition-all cursor-pointer shrink-0"
+          title="قانون عام أو دستور رياضي: ***دستور: $...$***"
+        >
+          <span>📐</span>
+          <span>قانون / دستور</span>
+        </button>
+
+        <div className="h-4 w-px bg-slate-300 mx-1 hidden sm:block" />
+
+        {/* Numbering Icons 1-10 */}
+        <div className="flex items-center gap-1 overflow-x-auto py-0.5">
+          <span className="text-[10px] font-black text-slate-500 ml-1 select-none">أرقام:</span>
+          {['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'].map((num, nIdx) => (
+            <button
+              key={nIdx}
+              type="button"
+              onClick={() => insertSymbol(num + ' ')}
+              className="w-6 h-6 flex items-center justify-center bg-white hover:bg-violet-50 text-violet-850 hover:text-violet-900 border border-violet-200/90 rounded-md text-xs font-black transition-all cursor-pointer shadow-2xs hover:border-violet-400 active:scale-95"
+              title={`إدراج رقم الخطوة ${num}`}
+            >
+              {num}
+            </button>
+          ))}
+        </div>
+
+        <div className="h-4 w-px bg-slate-300 mx-1 hidden sm:block" />
+
+        {/* Professional Quick Icons */}
+        <div className="flex items-center gap-1 overflow-x-auto py-0.5">
+          <span className="text-[10px] font-black text-slate-500 ml-1 select-none">أيقونات:</span>
+          {['💡', '🏆', '⚠️', '🎯', '✨', '📌', '🔹', '🔸', '📝', '📐', '🔍', '🚀'].map((ico, iIdx) => (
+            <button
+              key={iIdx}
+              type="button"
+              onClick={() => insertSymbol(ico + ' ')}
+              className="w-6 h-6 flex items-center justify-center bg-white hover:bg-slate-100 border border-slate-200 rounded-md text-xs transition-all cursor-pointer shadow-2xs active:scale-95"
+              title={`إدراج أيقونة ${ico}`}
+            >
+              {ico}
+            </button>
+          ))}
+        </div>
+
+        <div className="h-4 w-px bg-slate-300 mx-1 hidden sm:block" />
+
+        {/* Math Quick Symbols */}
+        {['√', '∫', 'lim', 'α', 'β', 'π', 'θ', 'Δ', '≠', '≤', '≥', '±', 'x²', '∞'].map((s, idx) => (
+          <button
+            key={idx}
+            type="button"
+            onClick={() => insertSymbol(s)}
+            className="px-2 py-0.5 bg-white hover:bg-slate-100 text-slate-800 border border-slate-200 rounded text-xs font-bold font-mono transition-all cursor-pointer shadow-2xs"
+          >
+            {s}
+          </button>
+        ))}
+      </div>
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 flex-1">
         {/* Editor Textarea */}
         <textarea
+          ref={textareaRef}
           value={localText}
           onChange={(e) => setLocalText(e.target.value)}
           placeholder="تعديل تفاصيل الملخص..."

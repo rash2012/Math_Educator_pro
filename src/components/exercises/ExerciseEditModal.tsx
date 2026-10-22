@@ -1,16 +1,17 @@
 import React, { useState } from 'react';
 import { type PracticeExercise } from '../../db';
 import { MathRenderer } from '../MathRenderer';
-import { cleanAndEnforceMathSvg } from '../../services/gemini';
-import { X, Save, Wand2, ImageIcon, Loader2 } from 'lucide-react';
+import { cleanAndEnforceMathSvg, regenerateExerciseStrategyAI } from '../../services/gemini';
+import { X, Save, Wand2, ImageIcon, Loader2, Sparkles } from 'lucide-react';
 
 interface ExerciseEditModalProps {
   sectionId: number;
   exercise: PracticeExercise;
   onClose: () => void;
   onSave: (updated: PracticeExercise) => void;
-  onAIGenerateSolution: (ex: PracticeExercise) => Promise<void>;
-  onAIGenerateSvg: (ex: PracticeExercise) => Promise<void>;
+  onAIGenerateSolution: (ex: PracticeExercise) => Promise<PracticeExercise | null | void>;
+  onAIGenerateSvg: (ex: PracticeExercise) => Promise<PracticeExercise | null | void>;
+  onAIGenerateStrategy?: (ex: PracticeExercise) => Promise<PracticeExercise | null | void>;
   aiLoading: 'solution' | 'strategy' | 'svg' | 'shorten' | null;
 }
 
@@ -21,9 +22,11 @@ export const ExerciseEditModal: React.FC<ExerciseEditModalProps> = ({
   onSave,
   onAIGenerateSolution,
   onAIGenerateSvg,
+  onAIGenerateStrategy,
   aiLoading
 }) => {
   const [exercise, setExercise] = useState<PracticeExercise>({ ...initialExercise });
+  const [internalLoading, setInternalLoading] = useState<'strategy' | null>(null);
   const [activeTextareaField, setActiveTextareaField] = useState<'questionText' | 'strategyText' | 'solutionText'>('questionText');
 
   const LATEX_SYMBOLS = [
@@ -152,7 +155,16 @@ export const ExerciseEditModal: React.FC<ExerciseEditModalProps> = ({
               <div className="flex items-center gap-1.5">
                 <button
                   type="button"
-                  onClick={() => onAIGenerateSolution(exercise)}
+                  onClick={async () => {
+                    const updated = await onAIGenerateSolution(exercise);
+                    if (updated) {
+                      setExercise(prev => ({
+                        ...prev,
+                        solutionText: updated.solutionText,
+                        strategyText: updated.strategyText
+                      }));
+                    }
+                  }}
                   disabled={aiLoading === 'solution'}
                   className="px-3 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-black rounded-lg border border-indigo-200 transition-all flex items-center gap-1 cursor-pointer"
                 >
@@ -161,7 +173,15 @@ export const ExerciseEditModal: React.FC<ExerciseEditModalProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => onAIGenerateSvg(exercise)}
+                  onClick={async () => {
+                    const updated = await onAIGenerateSvg(exercise);
+                    if (updated && updated.svgCode) {
+                      setExercise(prev => ({
+                        ...prev,
+                        svgCode: updated.svgCode
+                      }));
+                    }
+                  }}
                   disabled={aiLoading === 'svg'}
                   className="px-3 py-1 bg-violet-50 hover:bg-violet-100 text-violet-700 text-xs font-black rounded-lg border border-violet-200 transition-all flex items-center gap-1 cursor-pointer"
                 >
@@ -197,15 +217,57 @@ export const ExerciseEditModal: React.FC<ExerciseEditModalProps> = ({
             </div>
 
             {/* Strategy Text */}
-            <div className="space-y-1">
-              <label className="block text-xs font-bold text-amber-800">💡 فكرة واستراتيجية الحل:</label>
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between flex-wrap gap-1.5">
+                <label className="block text-xs font-black text-amber-900 flex items-center gap-1.5">
+                  <span>💡 فكرة واستراتيجية الحل:</span>
+                  <span className="text-[10px] font-normal text-amber-700/90 hidden sm:inline">(تحليل موجز لأفكار ومهارات الحل دون حل الطلبات)</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!exercise.questionText?.trim()) return;
+                    if (onAIGenerateStrategy) {
+                      const updated = await onAIGenerateStrategy(exercise);
+                      if (updated && updated.strategyText) {
+                        setExercise(prev => ({ ...prev, strategyText: updated.strategyText }));
+                      }
+                    } else {
+                      try {
+                        setInternalLoading('strategy');
+                        const res = await regenerateExerciseStrategyAI(
+                          exercise.questionText,
+                          exercise.solutionText || '',
+                          exercise.strategyText || '',
+                          exercise.title || 'تمرين'
+                        );
+                        if (res) {
+                          setExercise(prev => ({ ...prev, strategyText: res }));
+                        }
+                      } finally {
+                        setInternalLoading(null);
+                      }
+                    }
+                  }}
+                  disabled={aiLoading === 'strategy' || internalLoading === 'strategy' || !exercise.questionText?.trim()}
+                  className="px-2.5 py-1 bg-amber-100 hover:bg-amber-200 text-amber-950 text-xs font-black rounded-lg border border-amber-300 transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs disabled:opacity-50"
+                  title="إعادة صياغة فكرة واستراتيجية الحل بالذكاء الاصطناعي بأسلوب تربوي وبيداغوجي موجز واحترافي"
+                >
+                  {(aiLoading === 'strategy' || internalLoading === 'strategy') ? (
+                    <Loader2 size={12} className="animate-spin" />
+                  ) : (
+                    <Sparkles size={12} className="text-amber-800" />
+                  )}
+                  <span>إعادة صياغة الفكرة بالذكاء ✨</span>
+                </button>
+              </div>
               <textarea 
                 rows={3}
                 value={exercise.strategyText || ''}
                 onFocus={() => setActiveTextareaField('strategyText')}
                 onChange={e => setExercise({ ...exercise, strategyText: e.target.value })}
                 className="w-full text-sm p-3 border border-amber-300 bg-amber-50/30 rounded-xl focus:border-amber-500 focus:ring-1 focus:ring-amber-500 outline-none transition-all font-medium leading-relaxed"
-                placeholder="💡 فكرة الحل السريع وملاحظات التفكير الرياضي..."
+                placeholder="اكتب الفكرة العامة للتمرين وطريقة الحل بشكل موجز ومكثف (تحليل تربوي ومفاتيح الحل دون حل تفصيلي للطلبات)..."
               />
             </div>
 

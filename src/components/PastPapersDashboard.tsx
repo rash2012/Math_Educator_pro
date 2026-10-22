@@ -1,11 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { db, type PastPaper, type PastPaperQuestion } from '../db';
-import { solvePastPaperAI } from '../services/gemini';
-import { extractPdfText } from '../services/pdf';
+import { solvePastPaperAI, reviewPastPaperQuestionSolutionAI } from '../services/gemini';
+import { extractPdfText, convertPdfToImages } from '../services/pdf';
 import { MathRenderer } from './MathRenderer';
 import { AcademicMetadataFields } from './AcademicMetadataFields';
 import { DocumentMetadataModal } from './DocumentMetadataModal';
 import { UnifiedPageHeader } from './common/UnifiedPageHeader';
+import { PastPaperQuestionEditModal } from './PastPaperQuestionEditModal';
+import { PastPaperQuestionReviewModal } from './PastPaperQuestionReviewModal';
+import { PastPaperPrintPreviewModal } from './PastPaperPrintPreviewModal';
+import { SyncControlButton } from './SyncControlButton';
+import { LocalDatabaseIdBadge } from './common/LocalDatabaseIdBadge';
 import { 
   Loader2, 
   Plus, 
@@ -22,8 +27,39 @@ import {
   ChevronUp, 
   Upload, 
   HelpCircle,
-  Edit3
+  Edit3,
+  Download,
+  ShieldCheck,
+  X
 } from 'lucide-react';
+
+const ordinals = [
+  'السؤال الأول', 'السؤال الثاني', 'السؤال الثالث', 'السؤال الرابع',
+  'السؤال الخامس', 'السؤال السادس', 'السؤال السابع', 'السؤال الثامن',
+  'السؤال التاسع', 'السؤال العاشر', 'السؤال الحادي عشر', 'السؤال الثاني عشر',
+  'السؤال الثالث عشر', 'السؤال الرابع عشر', 'السؤال الخامس عشر'
+];
+
+function getQuestionOrderInfo(q: PastPaperQuestion, idx: number): { orderTitle: string; questionText: string } {
+  const text = q.question || '';
+  if (q.orderTitle && q.orderTitle.trim()) {
+    return { orderTitle: q.orderTitle.trim(), questionText: text };
+  }
+
+  // Check if text already starts with an order title like "السؤال الأول:", "التمرين الأول:", "المسألة الأولى:", "أولاً:"
+  const match = text.match(/^(السؤال\s+(?:الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر|الحادي\s+عشر|الثاني\s+عشر|\d+)|التمرين\s+(?:الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر|\d+)|المسألة\s+(?:الأولى|الثانية|الثالثة|الرابعة|الخامسة|\d+)|أولاً|ثانياً|ثالثاً|رابعاً|خامساً)([\s:،.-]+)([\s\S]*)$/i);
+  if (match) {
+    return {
+      orderTitle: match[1].trim(),
+      questionText: match[3].trim()
+    };
+  }
+
+  return {
+    orderTitle: ordinals[idx] || `السؤال ${idx + 1}`,
+    questionText: text
+  };
+}
 
 export const PastPapersDashboard: React.FC = () => {
   const [pastPapers, setPastPapers] = useState<PastPaper[]>([]);
@@ -49,6 +85,21 @@ export const PastPapersDashboard: React.FC = () => {
 
   // Accordion state for question solutions
   const [expandedSolutions, setExpandedSolutions] = useState<Record<string, boolean>>({});
+
+  // Question editing and review state
+  const [editingQuestion, setEditingQuestion] = useState<{ question: PastPaperQuestion; index: number } | null>(null);
+  const [reviewingQuestionId, setReviewingQuestionId] = useState<string | null>(null);
+  const [reviewModalData, setReviewModalData] = useState<{
+    question: PastPaperQuestion;
+    questionIndex: number;
+    reviewedSolution: string;
+    notes: string;
+    isCorrect: boolean;
+  } | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // Print preview state
+  const [printingPaper, setPrintingPaper] = useState<PastPaper | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -108,21 +159,33 @@ export const PastPapersDashboard: React.FC = () => {
 
     setError(null);
     setIsGenerating(true);
-    setGenerationPhase('جاري قراءة واستخراج النصوص من ملف الـ PDF...');
+    setGenerationPhase('جاري قراءة واستخراج النصوص والصفحات الأصلية من ملف الـ PDF...');
 
     try {
       // 1. Extract PDF contents
       const extracted = await extractPdfText(selectedFile);
-      
-      setGenerationPhase('جاري تحليل الأسئلة بالتفصيل وحل جميع المسائل والتمارين عبر الذكاء الاصطناعي... قد يستغرق هذا دقيقة.');
 
-      // 2. Call Gemini solver
-      const solvedData = await solvePastPaperAI(extracted.text, {
-        title,
-        grade: metadata.grade,
-        subject: metadata.subject,
-        year
-      });
+      // Extract high-resolution page images for multimodal verification
+      let pageImages: string[] = [];
+      try {
+        pageImages = await convertPdfToImages(selectedFile);
+      } catch (imgErr) {
+        console.warn("Could not extract images from PDF for vision assistance:", imgErr);
+      }
+      
+      setGenerationPhase('جاري استخراج نصوص الأسئلة حرفياً 100% وحل جميع المسائل والتمارين عبر الذكاء الاصطناعي... قد يستغرق هذا دقيقة.');
+
+      // 2. Call Gemini solver with extracted text and original page images
+      const solvedData = await solvePastPaperAI(
+        extracted.text, 
+        {
+          title,
+          grade: metadata.grade,
+          subject: metadata.subject,
+          year
+        },
+        pageImages
+      );
 
       setGenerationPhase('جاري حفظ الدورة المحلولة وتصنيف الأسئلة في قاعدة البيانات...');
 
@@ -135,7 +198,17 @@ export const PastPapersDashboard: React.FC = () => {
         part: metadata.part || undefined,
         unit: metadata.unit || undefined,
         year: solvedData.year || year,
-        questions: solvedData.questions || [],
+        questions: (solvedData.questions || []).map((q: any, i: number) => ({
+          id: q.id || `q_${i + 1}`,
+          orderTitle: q.orderTitle || undefined,
+          topic: q.topic || 'عام',
+          type: q.type || 'essay',
+          question: q.question || '',
+          subParts: q.subParts || [],
+          solution: q.solution || '',
+          svgCode: q.svgCode || '',
+          solutionSvgCode: q.solutionSvgCode || ''
+        })),
         createdAt: Date.now()
       };
 
@@ -196,35 +269,237 @@ export const PastPapersDashboard: React.FC = () => {
     }));
   };
 
-  const handlePrint = () => {
-    window.print();
+  const handlePrint = (paper?: PastPaper) => {
+    const target = paper || selectedPaper;
+    if (target) {
+      setPrintingPaper(target);
+    }
+  };
+
+  const handleDownloadJSON = (paper: PastPaper, e?: React.MouseEvent) => {
+    if (e) {
+      e.stopPropagation();
+    }
+    const exportData = {
+      title: paper.title,
+      country: paper.country || 'سوريا',
+      grade: paper.grade,
+      subject: paper.subject,
+      part: paper.part,
+      unit: paper.unit,
+      year: paper.year,
+      createdAt: paper.createdAt,
+      questions: paper.questions
+    };
+    const jsonStr = JSON.stringify(exportData, null, 2);
+    const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const safeTitle = (paper.title || `past_paper_${paper.year}`).replace(/[\\/:*?"<>|]/g, '_');
+    a.download = `${safeTitle}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Question Manual Edit and Review Handlers
+  const handleOpenEditQuestion = (q: PastPaperQuestion, idx: number) => {
+    setEditingQuestion({ question: q, index: idx });
+  };
+
+  const handleAddNewQuestion = () => {
+    if (!selectedPaper) return;
+    const newIdx = selectedPaper.questions?.length || 0;
+    const newQ: PastPaperQuestion = {
+      id: `q_${Date.now()}`,
+      orderTitle: ordinals[newIdx] || `السؤال ${newIdx + 1}`,
+      topic: 'عام',
+      type: 'essay',
+      question: '',
+      subParts: [],
+      solution: '',
+      svgCode: '',
+      solutionSvgCode: ''
+    };
+    setEditingQuestion({ question: newQ, index: newIdx });
+  };
+
+  const handleSaveQuestion = async (updatedQuestion: PastPaperQuestion) => {
+    if (!selectedPaper || !selectedPaper.id || editingQuestion === null) return;
+    
+    const currentQuestions = selectedPaper.questions ? [...selectedPaper.questions] : [];
+    if (editingQuestion.index < currentQuestions.length) {
+      currentQuestions[editingQuestion.index] = updatedQuestion;
+    } else {
+      currentQuestions.push(updatedQuestion);
+    }
+
+    try {
+      await db.pastPapers.update(selectedPaper.id, {
+        questions: currentQuestions
+      });
+
+      const updatedPaper = { ...selectedPaper, questions: currentQuestions };
+      setSelectedPaper(updatedPaper);
+      setPastPapers(prev => prev.map(p => p.id === selectedPaper.id ? updatedPaper : p));
+
+      setToastMessage(`تم حفظ وتحديث "${updatedQuestion.orderTitle || 'السؤال'}" بنجاح!`);
+      setTimeout(() => setToastMessage(null), 4000);
+    } catch (err) {
+      console.error(err);
+      alert("حدث خطأ أثناء حفظ تعديلات السؤال في قاعدة البيانات.");
+    } finally {
+      setEditingQuestion(null);
+    }
+  };
+
+  const handleReviewSolution = async (q: PastPaperQuestion, idx: number) => {
+    if (!q.question || !q.question.trim()) {
+      alert("لا يمكن مراجعة الحل لأن نص السؤال فارغ.");
+      return;
+    }
+    setReviewingQuestionId(q.id);
+    try {
+      const { orderTitle, questionText } = getQuestionOrderInfo(q, idx);
+      const res = await reviewPastPaperQuestionSolutionAI(
+        orderTitle,
+        questionText,
+        q.solution || '',
+        q.subParts,
+        q.topic
+      );
+
+      setReviewModalData({
+        question: q,
+        questionIndex: idx,
+        reviewedSolution: res.reviewedSolution,
+        notes: res.notes,
+        isCorrect: res.isCorrect !== false
+      });
+    } catch (err) {
+      console.error(err);
+      alert("حدث خطأ أثناء مراجعة الحل بالذكاء الاصطناعي. يرجى التأكد من الاتصال والمحاولة مجدداً.");
+    } finally {
+      setReviewingQuestionId(null);
+    }
+  };
+
+  const handleApplyReviewedSolution = async (reviewedSolution: string) => {
+    if (!selectedPaper || !selectedPaper.id || !reviewModalData) return;
+    const idx = reviewModalData.questionIndex;
+    const currentQuestions = selectedPaper.questions ? [...selectedPaper.questions] : [];
+    
+    if (idx >= currentQuestions.length) return;
+
+    currentQuestions[idx] = {
+      ...currentQuestions[idx],
+      solution: reviewedSolution
+    };
+
+    try {
+      await db.pastPapers.update(selectedPaper.id, {
+        questions: currentQuestions
+      });
+
+      const updatedPaper = { ...selectedPaper, questions: currentQuestions };
+      setSelectedPaper(updatedPaper);
+      setPastPapers(prev => prev.map(p => p.id === selectedPaper.id ? updatedPaper : p));
+
+      // Expand the solution so the teacher immediately sees it
+      setExpandedSolutions(prev => ({
+        ...prev,
+        [currentQuestions[idx].id]: true
+      }));
+
+      setToastMessage(`تم اعتماد الحل المراجع وتحديث "${currentQuestions[idx].orderTitle || 'السؤال'}" بنجاح!`);
+      setTimeout(() => setToastMessage(null), 4000);
+    } catch (err) {
+      console.error(err);
+      alert("حدث خطأ أثناء حفظ الحل المراجع.");
+    } finally {
+      setReviewModalData(null);
+    }
+  };
+
+  const handleOpenManualEditWithSolution = (solutionText: string) => {
+    if (!reviewModalData) return;
+    const qWithReviewedSolution: PastPaperQuestion = {
+      ...reviewModalData.question,
+      solution: solutionText
+    };
+    setEditingQuestion({
+      question: qWithReviewedSolution,
+      index: reviewModalData.questionIndex
+    });
+    setReviewModalData(null);
   };
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-32">
-      {/* Detail view of a selected Past Paper */}
-      {selectedPaper ? (
+      <div className={printingPaper ? 'no-print print:hidden' : ''}>
+        {/* Detail view of a selected Past Paper */}
+        {selectedPaper ? (
         <div className="space-y-6">
+          {/* Toast Notification */}
+          {toastMessage && (
+            <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 px-4 py-3 rounded-xl text-sm font-bold flex items-center justify-between no-print shadow-xs animate-fade-in">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 size={18} className="text-emerald-600" />
+                <span>{toastMessage}</span>
+              </div>
+              <button 
+                onClick={() => setToastMessage(null)} 
+                className="text-emerald-600 hover:text-emerald-950 p-1 cursor-pointer"
+                title="إغلاق التنبيه"
+              >
+                <X size={16} />
+              </button>
+            </div>
+          )}
+
           {/* Header Action Bar */}
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 bg-white p-4 rounded-xl border border-gray-200 no-print">
             <button
               onClick={() => setSelectedPaper(null)}
-              className="flex items-center gap-2 text-gray-600 hover:text-gray-900 font-bold text-sm self-start md:self-auto"
+              className="flex items-center gap-2 text-gray-600 hover:text-gray-900 font-bold text-sm self-start md:self-auto cursor-pointer"
             >
               <ArrowRight size={18} />
               الرجوع للدورات السابقة
             </button>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <LocalDatabaseIdBadge id={selectedPaper.id} tableLabel="pastPapers" compact={false} />
+              <SyncControlButton
+                table="pastPapers"
+                id={selectedPaper.id!}
+                data={selectedPaper}
+                showDraftOption={true}
+                buttonText="مزامنة ونشر الدورة"
+                onSyncComplete={(res) => {
+                  if (res.success) {
+                    setToastMessage(res.message);
+                    setTimeout(() => setToastMessage(null), 4000);
+                  }
+                }}
+              />
               <button
-                onClick={handlePrint}
-                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg font-bold text-sm hover:bg-indigo-700 transition"
+                onClick={(e) => handleDownloadJSON(selectedPaper, e)}
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 rounded-lg font-bold text-sm transition cursor-pointer"
+                title="تحميل الدورة كملف JSON"
+              >
+                <Download size={16} />
+                <span>تحميل JSON</span>
+              </button>
+              <button
+                onClick={() => handlePrint(selectedPaper)}
+                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg font-bold text-sm hover:bg-indigo-700 transition cursor-pointer shadow-sm"
+                title="معاينة الطباعة / حفظ كـ PDF"
               >
                 <Printer size={16} />
-                طباعة وتصدير الدورة
+                معاينة الطباعة / حفظ كـ PDF 🖨️
               </button>
               <button
                 onClick={() => handleDeletePaper(selectedPaper.id!)}
-                className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 hover:bg-red-100 rounded-lg font-bold text-sm transition"
+                className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 hover:bg-red-100 rounded-lg font-bold text-sm transition cursor-pointer"
               >
                 <Trash2 size={16} />
                 حذف الدورة
@@ -261,90 +536,156 @@ export const PastPapersDashboard: React.FC = () => {
 
               {selectedPaper.questions && selectedPaper.questions.length > 0 ? (
                 <div className="divide-y divide-gray-200">
-                  {selectedPaper.questions.map((q, idx) => (
-                    <div key={q.id || idx} className="py-6 first:pt-0 last:pb-0 space-y-4 print:break-inside-avoid">
-                      {/* Topic Tag */}
-                      <div className="flex justify-between items-start gap-4">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="bg-orange-50 text-orange-850 px-2.5 py-1 rounded-md text-xs font-bold border border-orange-200">
-                            {q.topic || 'عام'}
-                          </span>
-                          <span className="bg-gray-100 text-gray-700 px-2.5 py-1 rounded-md text-xs font-bold">
-                            {q.type === 'mcq' ? 'اختيار من متعدد' : 'سؤال مقالي / مسألة'}
-                          </span>
-                        </div>
-                        {/* Interactive toggle for solution (only visible on screen) */}
-                        <button
-                          onClick={() => toggleSolution(q.id)}
-                          className="flex items-center gap-1.5 text-xs font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1.5 rounded-lg transition no-print"
-                        >
-                          {expandedSolutions[q.id] ? (
-                            <>
-                              إخفاء الحل <ChevronUp size={14} />
-                            </>
-                          ) : (
-                            <>
-                              عرض الحل <ChevronDown size={14} />
-                            </>
-                          )}
-                        </button>
-                      </div>
-
-                      {/* Question Content */}
-                      <div className="bg-gray-50 border border-gray-100 rounded-xl p-4 md:p-6 space-y-4 print:bg-white print:border-none print:p-0">
-                        <div className="text-gray-900 leading-relaxed font-sans font-medium text-base">
-                          <MathRenderer content={q.question} />
-                        </div>
-
-                        {/* Optional Question SVG */}
-                        {q.svgCode && (
-                          <div 
-                            className="flex justify-center my-4 overflow-x-auto"
-                            dangerouslySetInnerHTML={{ __html: q.svgCode }}
-                          />
-                        )}
-
-                        {/* MCQ Options */}
-                        {q.type === 'mcq' && q.subParts && q.subParts.length > 0 && (
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4 print:grid-cols-2">
-                            {q.subParts.map((option, oIdx) => (
-                              <div 
-                                key={oIdx} 
-                                className="flex items-center gap-2 p-3 bg-white border border-gray-200 rounded-lg text-sm font-semibold print:border-black"
-                              >
-                                <span>{option}</span>
-                              </div>
-                            ))}
+                  {selectedPaper.questions.map((q, idx) => {
+                    const { orderTitle, questionText } = getQuestionOrderInfo(q, idx);
+                    return (
+                      <div key={q.id || idx} className="py-6 first:pt-0 last:pb-0 space-y-4 print:break-inside-avoid">
+                        {/* Topic Tag, Type Tag, Manual Edit, Solution Review, and Toggle */}
+                        <div className="flex flex-wrap justify-between items-center gap-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="bg-orange-50 text-orange-850 px-2.5 py-1 rounded-md text-xs font-bold border border-orange-200">
+                              {q.topic || 'عام'}
+                            </span>
+                            <span className="bg-gray-100 text-gray-700 px-2.5 py-1 rounded-md text-xs font-bold">
+                              {q.type === 'mcq' ? 'اختيار من متعدد' : 'سؤال مقالي / مسألة'}
+                            </span>
                           </div>
-                        )}
-                      </div>
 
-                      {/* Solution Area */}
-                      {/* Note: Always show when printing, or if expanded on screen */}
-                      <div className={`mt-4 space-y-4 border-l-4 border-emerald-500 bg-emerald-50/40 p-4 md:p-6 rounded-r-xl ${(expandedSolutions[q.id] || window.matchMedia('print').matches) ? 'block' : 'hidden no-print'}`}>
-                        <h4 className="font-extrabold text-sm text-emerald-800 flex items-center gap-1.5 border-b border-emerald-100 pb-2">
-                          <CheckCircle2 size={16} />
-                          الحل النموذجي المعتمد وزاريّاً:
-                        </h4>
+                          {/* Action Buttons (Visible on screen, hidden in print) */}
+                          <div className="flex items-center gap-2 flex-wrap no-print">
+                            {/* زر تعديل يدوي */}
+                            <button
+                              onClick={() => handleOpenEditQuestion(q, idx)}
+                              className="flex items-center gap-1.5 text-xs font-bold text-slate-700 hover:text-indigo-750 bg-slate-100 hover:bg-indigo-50 border border-slate-200 hover:border-indigo-200 px-3 py-1.5 rounded-lg transition cursor-pointer"
+                              title="تعديل يدوي كامل (العناوين، الترويسة، نص السؤال، والحل)"
+                            >
+                              <Edit3 size={13} className="text-indigo-600" />
+                              <span>تعديل يدوي</span>
+                            </button>
 
-                        <div className="text-gray-900 leading-relaxed font-sans font-medium">
-                          <MathRenderer content={q.solution} />
+                            {/* زر مراجعة الحل */}
+                            <button
+                              onClick={() => handleReviewSolution(q, idx)}
+                              disabled={reviewingQuestionId === q.id}
+                              className="flex items-center gap-1.5 text-xs font-bold text-emerald-800 hover:text-emerald-950 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-3 py-1.5 rounded-lg transition cursor-pointer disabled:opacity-60"
+                              title="مراجعة وتدقيق الحل بالذكاء الاصطناعي (خطوات منطقية ورياضية صحيحة - حل عادي غير مفصل جداً)"
+                            >
+                              {reviewingQuestionId === q.id ? (
+                                <>
+                                  <Loader2 size={13} className="animate-spin text-emerald-600" />
+                                  <span>جاري المراجعة...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Sparkles size={13} className="text-emerald-600" />
+                                  <span>مراجعة الحل</span>
+                                </>
+                              )}
+                            </button>
+
+                            {/* تفاصيل / إخفاء الحل */}
+                            <button
+                              onClick={() => toggleSolution(q.id)}
+                              className="flex items-center gap-1.5 text-xs font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1.5 rounded-lg transition no-print cursor-pointer"
+                            >
+                              {expandedSolutions[q.id] ? (
+                                <>
+                                  إخفاء الحل <ChevronUp size={14} />
+                                </>
+                              ) : (
+                                <>
+                                  عرض الحل <ChevronDown size={14} />
+                                </>
+                              )}
+                            </button>
+                          </div>
                         </div>
 
-                        {/* Optional Solution SVG */}
-                        {q.solutionSvgCode && (
-                          <div 
-                            className="flex justify-center my-4 overflow-x-auto" 
-                            dangerouslySetInnerHTML={{ __html: q.solutionSvgCode }}
-                          />
-                        )}
+                        {/* Question Content Container */}
+                        <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 md:p-6 space-y-4 print:bg-white print:border-none print:p-0 shadow-xs">
+                          {/* Question Order Title in RED (السؤال الأول، السؤال الثاني، إلخ) */}
+                          <div className="pb-2.5 border-b border-red-200/90 flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <span className="w-2.5 h-2.5 rounded-full bg-red-600 inline-block"></span>
+                              <h4 className="text-red-600 font-black text-base md:text-lg tracking-wide">
+                                {orderTitle}
+                              </h4>
+                            </div>
+                            <span className="text-[11px] font-mono font-bold text-gray-500 bg-white px-2 py-0.5 rounded-md border border-gray-200">
+                              #{idx + 1}
+                            </span>
+                          </div>
+
+                          <div className="text-gray-900 leading-relaxed font-sans font-medium text-base">
+                            <MathRenderer content={questionText} />
+                          </div>
+
+                          {/* Question Illustration SVG (الرسم التوضيحي المرفق بالسؤال) */}
+                          {q.svgCode && (
+                            <div className="my-4 p-3 bg-white rounded-xl border border-gray-200 shadow-xs flex flex-col items-center justify-center overflow-x-auto">
+                              <span className="text-[11px] font-black text-gray-600 mb-2 flex items-center gap-1 self-start">
+                                📐 الشكل التوضيحي المرفق بالسؤال:
+                              </span>
+                              <div 
+                                className="w-full flex justify-center items-center overflow-x-auto [&>svg]:max-w-full [&>svg]:h-auto"
+                                dangerouslySetInnerHTML={{ __html: q.svgCode }}
+                              />
+                            </div>
+                          )}
+
+                          {/* MCQ Options */}
+                          {q.type === 'mcq' && q.subParts && q.subParts.length > 0 && (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4 print:grid-cols-2">
+                              {q.subParts.map((option, oIdx) => (
+                                <div 
+                                  key={oIdx} 
+                                  className="flex items-center gap-2 p-3 bg-white border border-gray-200 rounded-lg text-sm font-semibold print:border-black"
+                                >
+                                  <span>{option}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Solution Area */}
+                        {/* Note: Always show when printing, or if expanded on screen */}
+                        <div className={`mt-4 space-y-4 border-l-4 border-emerald-500 bg-emerald-50/40 p-4 md:p-6 rounded-r-xl ${(expandedSolutions[q.id] || window.matchMedia('print').matches) ? 'block' : 'hidden no-print'}`}>
+                          <h4 className="font-extrabold text-sm text-emerald-800 flex items-center gap-1.5 border-b border-emerald-100 pb-2">
+                            <CheckCircle2 size={16} />
+                            الحل النموذجي المعتمد وزاريّاً:
+                          </h4>
+
+                          <div className="text-gray-900 leading-relaxed font-sans font-medium">
+                            <MathRenderer content={q.solution} />
+                          </div>
+
+                          {/* Optional Solution SVG */}
+                          {q.solutionSvgCode && (
+                            <div 
+                              className="flex justify-center my-4 overflow-x-auto" 
+                              dangerouslySetInnerHTML={{ __html: q.solutionSvgCode }}
+                            />
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : (
                 <p className="text-gray-500 font-medium py-4 text-center">لا توجد أسئلة مضافة في هذه الدورة.</p>
               )}
+
+              {/* Add New Question Button */}
+              <div className="pt-6 border-t border-gray-100 flex justify-center no-print">
+                <button
+                  onClick={handleAddNewQuestion}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold transition shadow-xs cursor-pointer active:scale-95"
+                >
+                  <Plus size={15} />
+                  <span>إضافة سؤال أو تمرين جديد للدورة</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -480,15 +821,28 @@ export const PastPapersDashboard: React.FC = () => {
                     )}
                   </div>
                 </div>
+
+                {/* Strict Zero-Modification Policy Card */}
+                <div className="bg-emerald-50 border border-emerald-200 text-emerald-950 rounded-xl p-3.5 text-xs flex items-start gap-2.5 shadow-2xs">
+                  <ShieldCheck size={18} className="text-emerald-600 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <p className="font-black text-emerald-950 text-xs">
+                      قاعدة صارمة وملزمة: النقل الحرفي الدقيق لنصوص الأسئلة 100%
+                    </p>
+                    <p className="text-emerald-850 leading-relaxed font-semibold text-[11px]">
+                      يُمنع منعاً باتاً وصارماً التصرف بصيغة السؤال أو تعديل كلماتها أو أرقامها؛ تبقى صيغة كل سؤال وتمرين ومسألة كما هي تماماً في ورقة الامتحان الأصلية دون زيادة أو نقصان.
+                    </p>
+                  </div>
+                </div>
               </div>
 
               <button
                 type="submit"
                 disabled={!selectedFile || !title.trim()}
-                className="w-full bg-indigo-600 text-white font-extrabold py-3.5 rounded-xl hover:bg-indigo-700 transition disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-base shadow-md"
+                className="w-full bg-indigo-600 text-white font-extrabold py-3.5 rounded-xl hover:bg-indigo-700 transition disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-base shadow-md cursor-pointer"
               >
                 <Sparkles size={18} />
-                بدء استخلاص وحل الدورة السابقة
+                بدء استخلاص وحل الدورة السابقة (نقل حرفي 100%)
               </button>
             </form>
           )}
@@ -524,10 +878,13 @@ export const PastPapersDashboard: React.FC = () => {
                   {/* Top bar with card style */}
                   <div className="p-5 flex-1 space-y-4">
                     <div className="flex justify-between items-start gap-2">
-                      <span className="bg-orange-50 text-orange-800 px-2.5 py-1 rounded-lg text-xs font-bold border border-orange-200 flex items-center gap-1">
-                        <Calendar size={12} />
-                        دورات: {paper.year}
-                      </span>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="bg-orange-50 text-orange-800 px-2.5 py-1 rounded-lg text-xs font-bold border border-orange-200 flex items-center gap-1">
+                          <Calendar size={12} />
+                          دورات: {paper.year}
+                        </span>
+                        <LocalDatabaseIdBadge id={paper.id} tableLabel="pastPapers" compact={true} />
+                      </div>
                       <span className="text-[10px] text-gray-400 font-semibold">
                         {new Date(paper.createdAt).toLocaleDateString('ar-SY')}
                       </span>
@@ -566,25 +923,61 @@ export const PastPapersDashboard: React.FC = () => {
                   </div>
 
                   {/* Actions footer */}
-                  <div className="border-t border-gray-100 p-3 bg-gray-50 flex justify-between items-center">
+                  <div className="border-t border-gray-100 p-3 bg-gray-50 flex justify-between items-center gap-2 flex-wrap">
                     <button
                       onClick={() => setSelectedPaper(paper)}
-                      className="flex items-center gap-1.5 text-xs font-bold text-indigo-600 hover:text-indigo-850"
+                      className="flex items-center gap-1.5 text-xs font-bold text-indigo-600 hover:text-indigo-850 cursor-pointer"
                     >
                       <Eye size={14} />
-                      عرض الدورة وحلولها
+                      <span>عرض وحل الدورة</span>
                     </button>
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {/* زر المزامنة السحابية إلى Supabase */}
+                      <SyncControlButton
+                        table="pastPapers"
+                        id={paper.id!}
+                        data={paper}
+                        showDraftOption={true}
+                        buttonText="مزامنة"
+                        variant="compact"
+                        onSyncComplete={(res) => {
+                          if (res.success) {
+                            setToastMessage(res.message);
+                            setTimeout(() => setToastMessage(null), 4000);
+                          }
+                        }}
+                      />
+                      {/* زر معاينة وحفظ كـ PDF مباشرة */}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handlePrint(paper);
+                        }}
+                        className="text-indigo-700 hover:text-indigo-900 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/90 px-2.5 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                        title="معاينة الطباعة / حفظ كـ PDF"
+                      >
+                        <Printer size={13} />
+                        <span>معاينة الطباعة / PDF</span>
+                      </button>
+                      {/* زر تحميل الدورة كملف JSON */}
+                      <button
+                        onClick={(e) => handleDownloadJSON(paper, e)}
+                        className="text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200/90 px-2 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer"
+                        title="تحميل الدورة كملف JSON"
+                      >
+                        <Download size={13} />
+                        <span>JSON</span>
+                      </button>
                       <button
                         onClick={() => setEditingPaper(paper)}
-                        className="text-gray-500 hover:text-indigo-600 p-1.5 hover:bg-indigo-50 rounded-lg transition"
+                        className="text-gray-500 hover:text-indigo-600 p-1.5 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
                         title="تعديل بيانات الدورة"
                       >
                         <Edit3 size={15} />
                       </button>
                       <button
                         onClick={() => handleDeletePaper(paper.id!)}
-                        className="text-gray-450 hover:text-red-600 p-1.5 hover:bg-red-50 rounded-lg transition"
+                        className="text-gray-450 hover:text-red-600 p-1.5 hover:bg-red-50 rounded-lg transition cursor-pointer"
                         title="حذف دورة"
                       >
                         <Trash2 size={15} />
@@ -616,6 +1009,7 @@ export const PastPapersDashboard: React.FC = () => {
           )}
         </div>
       )}
+      </div>
 
       {/* Edit Metadata Modal */}
       {editingPaper && (
@@ -632,6 +1026,42 @@ export const PastPapersDashboard: React.FC = () => {
             unit: editingPaper.unit
           }}
           onSave={handleSavePaperMetadata}
+        />
+      )}
+
+      {/* Manual Question Edit Modal */}
+      {editingQuestion && (
+        <PastPaperQuestionEditModal
+          isOpen={!!editingQuestion}
+          onClose={() => setEditingQuestion(null)}
+          question={editingQuestion.question}
+          questionIndex={editingQuestion.index}
+          onSave={handleSaveQuestion}
+        />
+      )}
+
+      {/* AI Solution Review Modal */}
+      {reviewModalData && (
+        <PastPaperQuestionReviewModal
+          isOpen={!!reviewModalData}
+          onClose={() => setReviewModalData(null)}
+          question={reviewModalData.question}
+          questionIndex={reviewModalData.questionIndex}
+          reviewedSolution={reviewModalData.reviewedSolution}
+          notes={reviewModalData.notes}
+          isCorrect={reviewModalData.isCorrect}
+          onApply={handleApplyReviewedSolution}
+          onOpenManualEditWithSolution={handleOpenManualEditWithSolution}
+        />
+      )}
+
+      {/* Direct Print Preview Modal */}
+      {printingPaper && (
+        <PastPaperPrintPreviewModal
+          isOpen={!!printingPaper}
+          onClose={() => setPrintingPaper(null)}
+          paper={printingPaper}
+          getQuestionOrderInfo={getQuestionOrderInfo}
         />
       )}
     </div>

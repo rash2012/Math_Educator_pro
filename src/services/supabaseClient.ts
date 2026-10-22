@@ -17,6 +17,32 @@ export function getSupabaseConfig(): { url: string; anonKey: string } {
   };
 }
 
+let activeClient: SupabaseClient<Database> | null = null;
+let lastUsedUrl = '';
+let lastUsedKey = '';
+
+function createInstance(url: string, anonKey: string): SupabaseClient<Database> {
+  const safeUrl = url.trim() || 'https://placeholder.supabase.co';
+  const safeKey = anonKey.trim() || 'placeholder-anon-key';
+  return createClient<Database>(safeUrl, safeKey, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true,
+    },
+  });
+}
+
+export function getSupabaseClient(): SupabaseClient<Database> {
+  const config = getSupabaseConfig();
+  if (!activeClient || config.url !== lastUsedUrl || config.anonKey !== lastUsedKey) {
+    lastUsedUrl = config.url;
+    lastUsedKey = config.anonKey;
+    activeClient = createInstance(config.url, config.anonKey);
+  }
+  return activeClient;
+}
+
 export function saveSupabaseConfig(url: string, anonKey: string) {
   if (typeof window !== 'undefined') {
     if (url) localStorage.setItem(STORAGE_KEY_URL, url.trim());
@@ -25,21 +51,19 @@ export function saveSupabaseConfig(url: string, anonKey: string) {
     if (anonKey) localStorage.setItem(STORAGE_KEY_KEY, anonKey.trim());
     else localStorage.removeItem(STORAGE_KEY_KEY);
   }
+  lastUsedUrl = url ? url.trim() : '';
+  lastUsedKey = anonKey ? anonKey.trim() : '';
+  activeClient = createInstance(lastUsedUrl, lastUsedKey);
 }
 
-const initialConfig = getSupabaseConfig();
-const clientUrl = initialConfig.url || 'https://placeholder.supabase.co';
-const clientKey = initialConfig.anonKey || 'placeholder-anon-key';
-
-// Primary Typed Supabase Client instance with persistent authentication session
-export const supabase = createClient<Database>(clientUrl, clientKey, {
-  auth: {
-    persistSession: true,
-    autoRefreshToken: true,
-    detectSessionInUrl: true,
+// Dynamic proxy ensuring all imported references to `supabase` delegate to the active client
+export const supabase = new Proxy({} as SupabaseClient<Database>, {
+  get(_target, prop) {
+    const client = getSupabaseClient();
+    const val = (client as any)[prop];
+    if (typeof val === 'function') {
+      return val.bind(client);
+    }
+    return val;
   },
 });
-
-export function getSupabaseClient(): SupabaseClient<Database> {
-  return supabase;
-}

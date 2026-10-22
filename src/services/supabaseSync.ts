@@ -160,8 +160,131 @@ export async function saveSyncMapping(
   }
 }
 
-export const getMappingIfExists = getSyncMapping;
-export const upsertSyncMapping = saveSyncMapping;
+// -------------------------------------------------------------
+// 1.1 Anti-Duplication & Natural Key Comparison Helpers
+// -------------------------------------------------------------
+
+export type ConfirmDialogHandler = (message: string) => Promise<boolean> | boolean;
+
+let syncConfirmHandler: ConfirmDialogHandler | null = null;
+
+export function setSyncConfirmHandler(handler: ConfirmDialogHandler | null) {
+  syncConfirmHandler = handler;
+}
+
+export async function confirmDialog(message: string): Promise<boolean> {
+  if (syncConfirmHandler) {
+    try {
+      return await syncConfirmHandler(message);
+    } catch {
+      return true;
+    }
+  }
+  // In iframe environments without modal handler, safely return true to link existing records
+  return true;
+}
+
+/**
+ * 1) دالة تطبيع العنوان: توحيد المسافات وترميز الحروف لتفادي التكرار
+ */
+export function normalizeTitle(t: string): string {
+  if (!t) return '';
+  return t.normalize('NFC').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+/**
+ * 2) دالة البحث عن وثيقة موجودة بنفس المفتاح الطبيعي (unit_id + doc_type + العنوان)
+ * المقارنة تتم في JavaScript (لا بـ ilike) لتفادي مشاكل الرموز الخاصة (% و _) في العناوين العربية
+ */
+export async function findExistingDocuments(unitRemoteId: string, docType: string, title: string) {
+  const supabase = getSupabaseClient();
+  if (!supabase) throw new Error('عميل Supabase غير متوفر');
+  let query = supabase
+    .from('NewDocuments')
+    .select('id, title, created_at')
+    .eq('doc_type', docType);
+
+  if (unitRemoteId) {
+    query = query.eq('unit_id', unitRemoteId);
+  }
+
+  const { data, error } = await query;
+  if (error) throw new Error(`تعذّر فحص التكرار: ${error.message}`);
+  const target = normalizeTitle(title);
+  return (data ?? []).filter((d: any) => normalizeTitle(d.title || '') === target);
+}
+
+export async function getMappingIfExists(localTable: string, localId: string | number): Promise<SyncMapping | undefined> {
+  let m = await getSyncMapping(localTable, localId);
+  if (!m) {
+    const tableEquivalents: Record<string, string[]> = {
+      NewDocuments: ['documents'],
+      documents: ['NewDocuments'],
+      NewTests: ['tests'],
+      tests: ['NewTests'],
+      NewQuestionBanks: ['questionBanks'],
+      questionBanks: ['NewQuestionBanks'],
+      NewExamSummaries: ['examSummaries'],
+      examSummaries: ['NewExamSummaries'],
+      NewPastPapers: ['pastPapers'],
+      pastPapers: ['NewPastPapers'],
+      NewLessonSections: ['lessonSections'],
+      lessonSections: ['NewLessonSections'],
+      NewLessonSectionExercises: ['practiceExercises'],
+      practiceExercises: ['NewLessonSectionExercises'],
+      NewExerciseFamilies: ['exerciseFamilies'],
+      exerciseFamilies: ['NewExerciseFamilies'],
+      NewExerciseStations: ['exerciseStations'],
+      exerciseStations: ['NewExerciseStations'],
+      NewUnitQuizzes: ['unitQuizzes'],
+      unitQuizzes: ['NewUnitQuizzes'],
+      NewUnitMindMaps: ['unitMindMaps'],
+      unitMindMaps: ['NewUnitMindMaps'],
+      NewUnitComprehensiveReviews: ['unitComprehensiveReviews'],
+      unitComprehensiveReviews: ['NewUnitComprehensiveReviews'],
+    };
+    const equivalents = tableEquivalents[localTable] || [];
+    for (const alt of equivalents) {
+      m = await getSyncMapping(alt, localId);
+      if (m) break;
+    }
+  }
+  return m;
+}
+
+export async function upsertSyncMapping(
+  localTable: string,
+  localId: string | number,
+  remoteId: string,
+  contentHash: string = '',
+  isPublished: boolean = true
+): Promise<void> {
+  await saveSyncMapping(localTable, localId, remoteId, contentHash, isPublished);
+  const altMap: Record<string, string> = {
+    documents: 'NewDocuments',
+    NewDocuments: 'documents',
+    tests: 'NewTests',
+    NewTests: 'tests',
+    questionBanks: 'NewQuestionBanks',
+    NewQuestionBanks: 'questionBanks',
+    examSummaries: 'NewExamSummaries',
+    NewExamSummaries: 'examSummaries',
+    pastPapers: 'NewPastPapers',
+    NewPastPapers: 'pastPapers',
+    lessonSections: 'NewLessonSections',
+    NewLessonSections: 'lessonSections',
+    practiceExercises: 'NewLessonSectionExercises',
+    NewLessonSectionExercises: 'practiceExercises',
+    exerciseFamilies: 'NewExerciseFamilies',
+    NewExerciseFamilies: 'exerciseFamilies',
+    exerciseStations: 'NewExerciseStations',
+    NewExerciseStations: 'exerciseStations',
+  };
+  const alt = altMap[localTable];
+  if (alt) {
+    await saveSyncMapping(alt, localId, remoteId, contentHash, isPublished);
+  }
+}
 
 /**
  * Inserts a single row into a Supabase table and returns its ID
@@ -193,14 +316,75 @@ export async function updateRow(tableName: string, remoteId: string, payload: an
 }
 
 /**
- * Calculates Content Hash for a comprehensive test:
+ * Helper to clean leading numbers or markers from text
+ */
+export const cleanLeadingMarkers = (text: string): string => {
+  if (!text) return '';
+  return text
+    .replace(/^[\s\d\-\.\)\(]*([①②③④⑤⑥⑦⑧⑨⑩⑪⑫])?[\s\d\-\.\)\(]*/, '$1')
+    .replace(/^[0-9]+[\.\-\)\:]\s*/, '')
+    .trim();
+};
+
+export const getQuestionFullText = (q: any): string => {
+  if (!q) return '';
+  const mainText = (q.text || '').trim();
+  const subQs: any[] = Array.isArray(q.subQuestions) 
+    ? q.subQuestions 
+    : (Array.isArray(q.subParts) ? q.subParts : []);
+  
+  if (subQs.length === 0) {
+    return mainText;
+  }
+  
+  // Check if mainText already includes all subquestion texts
+  const subTexts = subQs.map(sq => (typeof sq === 'string' ? sq : (sq.text || sq.prompt || '')).trim()).filter(Boolean);
+  const alreadyCombined = subTexts.length > 0 && subTexts.every(st => {
+    const cleanSt = cleanLeadingMarkers(st);
+    return mainText.includes(st) || (cleanSt.length > 5 && mainText.includes(cleanSt));
+  });
+  if (alreadyCombined) {
+    return mainText;
+  }
+  
+  // Format subquestions
+  const formattedSubs = subQs.map((sq, idx) => {
+    if (typeof sq === 'object') {
+      const subMain = (sq.text || sq.prompt || '').trim();
+      const parts = sq.subParts || sq.parts || sq.items || [];
+      if (Array.isArray(parts) && parts.length > 0) {
+        const partsStr = parts.map((p: any, pIdx: number) => {
+          const l = p.letter || String.fromCharCode(97 + pIdx);
+          const t = typeof p === 'object' ? (p.text || '') : String(p);
+          return `   ${l}) ${cleanLeadingMarkers(t)}`;
+        }).join('\n');
+        return `${idx + 1}) ${cleanLeadingMarkers(subMain)}\n${partsStr}`;
+      }
+      return `${idx + 1}) ${cleanLeadingMarkers(subMain)}`;
+    }
+    const rawSq = String(sq).trim();
+    if (/^[\d①-⑫]+[\.\-\)\:]/.test(rawSq)) {
+      return rawSq;
+    }
+    return `${idx + 1}) ${cleanLeadingMarkers(rawSq)}`;
+  });
+
+  if (!mainText) {
+    return formattedSubs.join('\n');
+  }
+  return `${mainText}\n${formattedSubs.join('\n')}`;
+};
+
+/**
+ * دالة تجزئة متقدمة للاختبارات الشاملة (NewTests & NewTestSections & NewTestQuestions)
+ * تلتقط أي تعديل في:
  * title, difficulty, topic_label (or scope), and full testData (including sections, questions, solutions).
  * Any modification to even a single solution or question text will produce a different hash.
  */
 export function computeTestHash(test: any): string {
   if (!test) return '';
   const payloadToHash = {
-    title: test.testData?.title || test.title || '',
+    title: test.title || test.testData?.title || '',
     difficulty: test.difficulty || '',
     topic_label: test.scope || test.topic_label || '',
     testData: test.testData || null,
@@ -295,17 +479,24 @@ export function deriveTestScope(
     return 'part';
   }
 
-  // 2. اختبار شامل لجميع الوحدات (مثل: الجزء شامل - الوحدة شامل الواحدات)
+  // 2. إذا كانت الوحدة محددة وليست كلمة شمولية، فهذا اختبار وحدة حصراً (حتى لو كان scope القديم "عام")
+  if (test.unit && test.unit.trim() !== '' && !isComprehensiveUnitKeyword(test.unit)) {
+    if (test.scope !== 'subject_comprehensive' && test.scope !== 'multi_unit' && test.scope !== 'شامل') {
+      return 'unit';
+    }
+  }
+
+  // 3. اختبار شامل لجميع الوحدات (مثل: الجزء شامل - الوحدة شامل الواحدات)
   if (isSubjectComprehensiveTest(test)) {
     return 'subject_comprehensive';
   }
 
-  // 3. اختبار وحدة دراسية تخصصية مفردة (فقط إن لم تكن كلمة شمولية)
+  // 4. اختبار وحدة دراسية تخصصية مفردة (فقط إن لم تكن كلمة شمولية)
   if (test.unit && test.unit.trim() !== '' && !isComprehensiveUnitKeyword(test.unit)) {
     return 'unit';
   }
 
-  // 4. إذا كان الجزء محدداً بدون وحدة
+  // 5. إذا كان الجزء محدداً بدون وحدة
   if (test.part && test.part.trim() !== '') {
     return 'part';
   }
@@ -356,6 +547,65 @@ export async function resolveUnitRemoteIdByName(unitName: string): Promise<strin
 }
 
 /**
+ * Resolves remote UUID for a subject by name from NewSubjects.
+ * Matches resolveUnitRemoteIdByName pattern, with fallback to resolveTaxonomyHierarchy.
+ */
+export async function resolveSubjectRemoteIdByName(
+  subjectName: string = 'الرياضيات',
+  gradeName?: string,
+  countryName?: string
+): Promise<string> {
+  const supabase = getSupabaseClient();
+  if (!supabase) throw new Error('عميل Supabase غير متوفر');
+
+  const trimmed = (subjectName || 'الرياضيات').trim();
+  const normalize = (s: string) => s.replace(/[-:ـ\s]+/g, ' ').trim().toLowerCase();
+  const normTarget = normalize(trimmed);
+
+  const { data: directMatches, error } = await supabase
+    .from('NewSubjects')
+    .select('id, name')
+    .eq('name', trimmed);
+
+  if (!error && directMatches && directMatches.length > 0) {
+    return directMatches[0].id;
+  }
+
+  const { data: allSubjects, error: allErr } = await supabase
+    .from('NewSubjects')
+    .select('id, name');
+
+  if (!allErr && allSubjects && allSubjects.length > 0) {
+    const found = allSubjects.find(s => normalize(s.name) === normTarget || s.name.trim() === trimmed);
+    if (found) {
+      return found.id;
+    }
+  }
+
+  // Fallback to resolveTaxonomyHierarchy to safely find or create the subject
+  const { subjectId } = await resolveTaxonomyHierarchy({
+    country: countryName || 'سوريا',
+    grade: gradeName || 'الثالث الثانوي العلمي',
+    subject: trimmed,
+  });
+
+  if (subjectId) {
+    return subjectId;
+  }
+
+  throw new Error(`المادة "${trimmed}" غير موجودة سحابياً بعد — زامِن المادة أولاً`);
+}
+
+/**
+ * Derives section type for past paper questions based on orderTitle
+ */
+export function deriveSectionType(orderTitle: string = ''): 'question' | 'exercise' | 'problem' {
+  if (orderTitle.includes('مسألة')) return 'problem';
+  if (orderTitle.includes('تمرين')) return 'exercise';
+  return 'question'; // الافتراضي لأي شيء يبدأ بـ"السؤال"
+}
+
+/**
  * Determines whether a local item is not synced, modified, draft, or matching
  */
 export async function getSyncStatus(
@@ -385,6 +635,29 @@ export async function getSyncStatus(
             const testHash = computeTestHash(currentData);
             await saveSyncMapping('tests', localId, remoteTest.id, testHash, remoteTest.is_published !== false);
             return remoteTest.is_published === false ? 'draft_cloud' : 'synced';
+          }
+        } catch {
+          // ignore network check error
+        }
+      }
+    }
+
+    // بالنسبة للدورات السابقة: فحص ما إذا كانت الدورة مرفوعة وموجودة سحابياً
+    if (localTable === 'pastPapers' && currentData?.title) {
+      const supabase = getSupabaseClient();
+      if (supabase) {
+        try {
+          const paperTitle = (currentData.title || '').trim();
+          const { data: rData } = await supabase
+            .from('NewPastPapers')
+            .select('id, is_published')
+            .eq('title', paperTitle)
+            .limit(1);
+          if (rData && rData.length > 0) {
+            const remotePaper = rData[0];
+            const paperHash = computeContentHash(currentData);
+            await saveSyncMapping('pastPapers', localId, remotePaper.id, paperHash, remotePaper.is_published !== false);
+            return remotePaper.is_published === false ? 'draft_cloud' : 'synced';
           }
         } catch {
           // ignore network check error
@@ -866,14 +1139,43 @@ export async function syncDocumentHierarchy(
       part: doc.part,
     });
 
-    // ---------------------------------------------------------
-    // الخطوة 1: مزامنة NewDocuments
-    // ---------------------------------------------------------
-    onProgress?.('مزامنة بيانات الوثيقة والوحدة (NewDocuments)...', 12);
-    const docHash = computeContentHash(doc);
-    const docMapping = await getSyncMapping('documents', docId);
+    // عدادات المزامنة والربط لمنع التكرار وعرض التقرير الختامي
+    let linkedCount = 0;
+    let addedCount = 0;
+    let deletedCount = 0;
 
+    // ---------------------------------------------------------
+    // الخطوة 1: فحص التكرار ومزامنة NewDocuments (مقارنة المفتاح الطبيعي)
+    // ---------------------------------------------------------
+    onProgress?.('فحص التكرار ومزامنة بيانات الوثيقة والوحدة (NewDocuments)...', 12);
+    const docHash = computeContentHash(doc);
     const docType = doc.type || 'lesson';
+
+    let mapping = await getMappingIfExists('NewDocuments', String(doc.id));
+
+    if (!mapping) {
+      const matches = await findExistingDocuments(unitId, docType, doc.title);
+
+      if (matches.length > 1) {
+        throw new Error(
+          `يوجد ${matches.length} وثائق مكررة بعنوان "${doc.title}" في السحابة. ` +
+          `نظّفها أولاً (استعلام التنظيف) ثم أعد المزامنة.`
+        );
+      }
+
+      if (matches.length === 1) {
+        // لا تتصرف بصمت: اطلب تأكيداً صريحاً من المستخدم
+        const confirmed = await confirmDialog(
+          `توجد في السحابة وثيقة بنفس العنوان "${doc.title}" ` +
+          `(أُنشئت ${new Date(matches[0].created_at).toLocaleString('ar')}).\n` +
+          `هل تريد ربط هذه النسخة المحلية بها وتحديثها بدل إنشاء نسخة جديدة؟`
+        );
+        if (!confirmed) throw new Error('أُلغيت المزامنة لتفادي التكرار');
+        await upsertSyncMapping('NewDocuments', String(doc.id), matches[0].id);
+        mapping = await getMappingIfExists('NewDocuments', String(doc.id));
+        linkedCount++;
+      }
+    }
 
     const docPayload: any = {
       title: doc.title,
@@ -887,7 +1189,7 @@ export async function syncDocumentHierarchy(
       updated_at: new Date(doc.updatedAt || Date.now()).toISOString(),
     };
 
-    let remoteDocId = docMapping?.remoteId;
+    let remoteDocId = mapping?.remoteId;
 
     if (remoteDocId) {
       docPayload.id = remoteDocId;
@@ -908,9 +1210,10 @@ export async function syncDocumentHierarchy(
 
       if (error) throw new Error(formatSupabaseErrorMessage('خطوة 1 [NewDocuments Insert]', error));
       remoteDocId = data.id;
+      addedCount++;
     }
 
-    await saveSyncMapping('documents', docId, remoteDocId!, docHash, isPublished);
+    await upsertSyncMapping('NewDocuments', String(docId), remoteDocId!, docHash, isPublished);
 
     // ---------------------------------------------------------
     // الخطوة 2: مزامنة NewPdfContents (مع رفع Storage)
@@ -963,7 +1266,7 @@ export async function syncDocumentHierarchy(
     }
 
     // ---------------------------------------------------------
-    // الخطوة 3: مزامنة NewLessonSections
+    // الخطوة 3: مزامنة NewLessonSections (مع تبنّي الأقسام السحابية ومنع التكرار)
     // ---------------------------------------------------------
     onProgress?.('مزامنة الدروس والفقرات النظرية (NewLessonSections)...', 40);
     const rawSections = await db.lessonSections.where('docId').equals(docId).toArray();
@@ -973,6 +1276,8 @@ export async function syncDocumentHierarchy(
       if (orderA !== orderB) return orderA - orderB;
       return (Number(a.id) || 0) - (Number(b.id) || 0);
     });
+
+    const maxLocalOrder = sortedSections.length;
 
     // ترقيم الفقرات محلياً بشكل متسلسل يبدأ من 1 لتفادي تكرار order = 0
     for (let idx = 0; idx < sortedSections.length; idx++) {
@@ -984,54 +1289,52 @@ export async function syncDocumentHierarchy(
       }
     }
 
-    // جلب الفقرات الموجودة مسبقاً في السحابة لهذا المستند للربط وتفادي تصادم order_index
+    // جلب الفقرات الموجودة مسبقاً في السحابة لهذا المستند للربط والتبنّي
     const { data: remoteExistingSections } = await supabase
       .from('NewLessonSections')
       .select('id, title, order_index')
       .eq('document_id', remoteDocId);
 
-    const remoteIdSet = new Set((remoteExistingSections || []).map(r => r.id));
-    const usedRemoteSecIds = new Set<string>();
-
-    for (const sec of sortedSections) {
-      if (!sec.id) continue;
-      const secMapping = await getSyncMapping('lessonSections', sec.id);
-      if (secMapping?.remoteId && remoteIdSet.has(secMapping.remoteId)) {
-        usedRemoteSecIds.add(secMapping.remoteId);
-      }
-    }
-
-    const availableRemoteSections = (remoteExistingSections || []).filter(r => !usedRemoteSecIds.has(r.id));
-
-    // إزاحة order_index للفقرات السحابية السابقة مؤقتاً لتجنب أي تصادم في القيد الفريد أثناء التحديث
-    if (remoteExistingSections && remoteExistingSections.length > 0) {
-      for (let rIdx = 0; rIdx < remoteExistingSections.length; rIdx++) {
-        await supabase
-          .from('NewLessonSections')
-          .update({ order_index: 50000 + rIdx + 1 })
-          .eq('id', remoteExistingSections[rIdx].id);
-      }
-    }
-
     const sectionRemoteMap = new Map<number, string>();
+    const matchedRemoteSecIds = new Set<string>();
 
     for (let idx = 0; idx < sortedSections.length; idx++) {
       const sec = sortedSections[idx];
       if (!sec.id) continue;
+      const targetOrder = idx + 1;
       const secHash = computeContentHash(sec);
-      const secMapping = await getSyncMapping('lessonSections', sec.id);
+      const secMapping = await getMappingIfExists('lessonSections', sec.id);
 
       let remoteSecId: string | undefined = undefined;
-      if (secMapping?.remoteId && remoteIdSet.has(secMapping.remoteId)) {
+
+      // 1. فحص إذا كان للفقرة ربط محلي سابق
+      if (secMapping?.remoteId && (remoteExistingSections || []).some(r => r.id === secMapping!.remoteId)) {
         remoteSecId = secMapping.remoteId;
       } else {
-        const titleMatchIdx = availableRemoteSections.findIndex(r => r.title?.trim() === sec.title?.trim());
-        if (titleMatchIdx >= 0) {
-          remoteSecId = availableRemoteSections[titleMatchIdx].id;
-          availableRemoteSections.splice(titleMatchIdx, 1);
-        } else if (availableRemoteSections.length > 0) {
-          remoteSecId = availableRemoteSections.shift()?.id;
+        // 2. تبني الأقسام السحابية: مطابقة بمفتاح (document_id, order_index)
+        const matchByOrder = (remoteExistingSections || []).find(
+          r => r.order_index === targetOrder && !matchedRemoteSecIds.has(r.id)
+        );
+        if (matchByOrder) {
+          remoteSecId = matchByOrder.id;
+          await upsertSyncMapping('lessonSections', sec.id, remoteSecId, secHash, isPublished);
+          linkedCount++;
+        } else {
+          // مطابقة بالعنوان بعد التطبيع كخيار احتياطي
+          const normSecTitle = normalizeTitle(sec.title);
+          const matchByTitle = (remoteExistingSections || []).find(
+            r => normalizeTitle(r.title || '') === normSecTitle && !matchedRemoteSecIds.has(r.id)
+          );
+          if (matchByTitle) {
+            remoteSecId = matchByTitle.id;
+            await upsertSyncMapping('lessonSections', sec.id, remoteSecId, secHash, isPublished);
+            linkedCount++;
+          }
         }
+      }
+
+      if (!remoteSecId) {
+        addedCount++;
       }
 
       // استخراج التحليلات والإضافات التربوية من analysis.additions إن وجدت لتعبئة الأعمدة المستقلة بدقة
@@ -1040,15 +1343,12 @@ export async function syncDocumentHierarchy(
         : [];
 
       const getAdditionContent = (index: number, exactLabels: string[], fallbackKeywords: string[]): string | null => {
-        // 1. مطابقة دقيقة أولاً بالوسم الكامل (لتجنب التداخل بين "مطبات امتحانية" و"الدليل الامتحاني")
         const itemByExact = additions.find((a: any) => 
           a && typeof a.label === 'string' && exactLabels.some(l => a.label.trim() === l.trim() || a.label.includes(l))
         );
-        // 2. مطابقة بالكلمات المفتاحية الفريدة
         const itemByKeyword = !itemByExact ? additions.find((a: any) =>
           a && typeof a.label === 'string' && fallbackKeywords.some(k => a.label.includes(k))
         ) : null;
-        // 3. التراجع للترتيب الافتراضي index
         const itemByIndex = additions[index];
         const res = itemByExact || itemByKeyword || itemByIndex;
         return (res && typeof res.content === 'string' && res.content.trim()) ? res.content.trim() : null;
@@ -1056,19 +1356,15 @@ export async function syncDocumentHierarchy(
 
       const resolvedGuidance = sec.guidance || getAdditionContent(0, ['إرشادات ذكية للطالب', 'إرشادات ذكية', 'إرشادات'], ['إرشاد']);
       const resolvedNotes = sec.notes || getAdditionContent(1, ['ملاحظات ونتائج هامة', 'ملاحظات ونتائج ذهبية', 'ملاحظات هامة'], ['ملاحظ']);
-      // traps: حصر البحث بكلمة "مطب" أو "مطبات" أو "تحذير" وتجنب كلمة "امتحان" العامة
       const resolvedTraps = sec.traps || getAdditionContent(2, ['مطبات امتحانية وتحذيرات', 'مطبات امتحانية', 'مطب امتحاني - كُن حذراً'], ['مطب', 'مطبات', 'تحذير']);
-      // exam_guidance: حصر البحث بـ "الدليل الامتحاني" أو "دليل" أو "امتحان" ولكن استبعاد العناصر التي تحوي "مطب"
       const examGuidanceFromAdditions = (() => {
         const item = additions.find((a: any) => {
           if (!a || typeof a.label !== 'string') return false;
           const lbl = a.label;
-          // يجب أن يحوي دلالة الامتحان أو الدليل، وبشرط ألا يكون مطباً امتحانياً
           return (lbl.includes('الدليل الامتحاني') || lbl.includes('الدليل المنهجي') || lbl.includes('طريقة ورود الفكرة')) 
             && !lbl.includes('مطب');
         });
         if (item && typeof item.content === 'string' && item.content.trim()) return item.content.trim();
-        // تراجع بالفهرس 3 (موقع الدليل الامتحاني القياسي)
         const itemAt3 = additions[3];
         return (itemAt3 && typeof itemAt3.content === 'string' && itemAt3.content.trim()) ? itemAt3.content.trim() : null;
       })();
@@ -1079,7 +1375,6 @@ export async function syncDocumentHierarchy(
       const resolvedExtraExampleText = sec.extraExampleText || getAdditionContent(6, ['تمرين إضافي داعم', 'تمرين إضافي مكرّس ذو صياغة ذكية', 'تمرين إضافي'], ['إضافي']);
       const resolvedExtraSolutionText = sec.extraSolutionText || getAdditionContent(7, ['حل التمرين الإضافي', 'الحل النموذجي للتمرين الإضافي'], ['حل التمرين الإضافي', 'حل إضافي']);
 
-      // كل صف في NewLessonSections هو درس كامل ومستقل بذاته تماماً بلا أي توارث
       const secPayload: any = {
         document_id: remoteDocId,
         unit_id: unitId || null,
@@ -1090,7 +1385,7 @@ export async function syncDocumentHierarchy(
         svg_code: sec.svgCode || null,
         analysis_rephrased_content: typeof sec.analysis === 'string' ? sec.analysis : (sec.analysis?.rephrasedContent || null),
         analysis_additions: typeof sec.analysis === 'object' ? sec.analysis : null,
-        order_index: idx + 1,
+        order_index: targetOrder,
         concept_label: sec.conceptLabel || null,
         illustrations_label: sec.illustrationsLabel || null,
         practice_section_label: sec.practiceSectionLabel || null,
@@ -1106,47 +1401,58 @@ export async function syncDocumentHierarchy(
         extra_solution_text: resolvedExtraSolutionText || null,
       };
 
-      const cleanSavePayload = { ...secPayload };
       if (remoteSecId) {
-        cleanSavePayload.id = remoteSecId;
+        secPayload.id = remoteSecId;
       }
 
-      let saveResult = remoteSecId
-        ? await supabase.from('NewLessonSections').upsert(cleanSavePayload).select('id').single()
-        : await supabase.from('NewLessonSections').insert(cleanSavePayload).select('id').single();
+      let saveResult = await supabase
+        .from('NewLessonSections')
+        .upsert(secPayload, { onConflict: 'document_id,order_index' })
+        .select('id')
+        .single();
 
-      // التوافق المرن: إذا كان جدول NewLessonSections لا يحوي بعد عمود unit_id أو youtube_url في قاعدة البيانات، نتجاوزهما تلقائياً
+      // التوافق المرن: إذا كان جدول NewLessonSections لا يحوي بعد عمود unit_id أو youtube_url في قاعدة البيانات
       if (saveResult.error && saveResult.error.message && (saveResult.error.message.includes('unit_id') || saveResult.error.message.includes('youtube_url') || saveResult.error.code === 'PGRST204')) {
-        const fallbackPayload = { ...cleanSavePayload };
+        const fallbackPayload = { ...secPayload };
         if (saveResult.error.message.includes('unit_id')) delete fallbackPayload.unit_id;
         if (saveResult.error.message.includes('youtube_url')) delete fallbackPayload.youtube_url;
-        saveResult = remoteSecId
-          ? await supabase.from('NewLessonSections').upsert(fallbackPayload).select('id').single()
-          : await supabase.from('NewLessonSections').insert(fallbackPayload).select('id').single();
+        saveResult = await supabase
+          .from('NewLessonSections')
+          .upsert(fallbackPayload, { onConflict: 'document_id,order_index' })
+          .select('id')
+          .single();
       }
 
       if (saveResult.error) throw new Error(formatSupabaseErrorMessage('خطوة 3 [NewLessonSections]', saveResult.error));
       remoteSecId = saveResult.data.id;
 
+      matchedRemoteSecIds.add(remoteSecId!);
       sectionRemoteMap.set(sec.id, remoteSecId!);
-      await saveSyncMapping('lessonSections', sec.id, remoteSecId!, secHash, isPublished);
+      await upsertSyncMapping('lessonSections', sec.id, remoteSecId!, secHash, isPublished);
     }
 
-    // تنظيف الفقرات السحابية المحذوفة محلياً
-    const syncedRemoteSecIds = new Set(Array.from(sectionRemoteMap.values()));
-    const orphanSections = (remoteExistingSections || []).filter(r => !syncedRemoteSecIds.has(r.id));
+    // بعد الانتهاء احذف من السحابة الأقسام التي order_index لها أكبر من آخر قسم محلي
+    const orphanSections = (remoteExistingSections || []).filter(
+      r => r.order_index > maxLocalOrder || !matchedRemoteSecIds.has(r.id)
+    );
     if (orphanSections.length > 0) {
       const orphanIds = orphanSections.map(r => r.id);
       try {
-        await supabase.from('NewLessonSectionExercises').delete().in('section_id', orphanIds);
+        const { data: oExs } = await supabase.from('NewLessonSectionExercises').select('id').in('section_id', orphanIds);
+        if (oExs && oExs.length > 0) {
+          const oExIds = oExs.map(e => e.id);
+          await supabase.from('NewExerciseStations').delete().in('exercise_id', oExIds);
+          await supabase.from('NewLessonSectionExercises').delete().in('id', oExIds);
+        }
         await supabase.from('NewLessonSections').delete().in('id', orphanIds);
+        deletedCount += orphanSections.length;
       } catch (delErr) {
         console.warn('Could not clean up orphan sections:', delErr);
       }
     }
 
     // ---------------------------------------------------------
-    // الخطوة 4: مزامنة NewLessonSectionExercises (بدون family_id أولاً)
+    // الخطوة 4: مزامنة NewLessonSectionExercises (مطابقة kind, order_index وتبنّي التمارين)
     // ---------------------------------------------------------
     onProgress?.('مزامنة التمارين والمسائل التطبيقية (NewLessonSectionExercises)...', 55);
     const exerciseRemoteMap = new Map<string, string>();
@@ -1162,59 +1468,41 @@ export async function syncDocumentHierarchy(
         ...(sec.practicalExercises || []).map(ex => ({ ...ex, kind: 'practical' as const }))
       ];
 
-      // جلب التمارين السحابية المسبقة لهذه الفقرة لمنع تصادم الترتيب
+      // اجلب تمارين القسم السحابية (id, kind, order_index)
       const { data: remoteExistingExercises } = await supabase
         .from('NewLessonSectionExercises')
-        .select('id, title, order_index')
+        .select('id, kind, order_index, title')
         .eq('section_id', remoteSecId);
-
-      const remoteExIdSet = new Set((remoteExistingExercises || []).map(r => r.id));
-      const usedRemoteExIds = new Set<string>();
-
-      for (const ex of allExercisesToSync) {
-        if (!ex.id) continue;
-        const exMapping = await getSyncMapping('practiceExercises', ex.id);
-        if (exMapping?.remoteId && remoteExIdSet.has(exMapping.remoteId)) {
-          usedRemoteExIds.add(exMapping.remoteId);
-        }
-      }
-
-      const availableRemoteExercises = (remoteExistingExercises || []).filter(r => !usedRemoteExIds.has(r.id));
-
-      if (remoteExistingExercises && remoteExistingExercises.length > 0) {
-        for (let rIdx = 0; rIdx < remoteExistingExercises.length; rIdx++) {
-          await supabase
-            .from('NewLessonSectionExercises')
-            .update({ order_index: 50000 + rIdx + 1 })
-            .eq('id', remoteExistingExercises[rIdx].id);
-        }
-      }
 
       const currentSecSyncedExIds = new Set<string>();
 
       for (let exIdx = 0; exIdx < allExercisesToSync.length; exIdx++) {
         const ex = allExercisesToSync[exIdx];
         if (!ex.id) continue;
+        const targetOrder = exIdx + 1;
 
-        // حارس أمان إضافي للتحقق من قيمة kind
         if (!['practice', 'practical'].includes(ex.kind)) {
           console.error(`قيمة kind غير صالحة: ${ex.kind} للتمرين ${ex.id}`);
           throw new Error(`تعذّرت مزامنة التمرين "${ex.title}" بسبب قيمة kind غير صالحة`);
         }
 
         const exHash = computeContentHash(ex);
-        const exMapping = await getSyncMapping('practiceExercises', ex.id);
+        const exMapping = await getMappingIfExists('practiceExercises', ex.id);
 
         let remoteExId: string | undefined = undefined;
-        if (exMapping?.remoteId && remoteExIdSet.has(exMapping.remoteId)) {
+
+        // 1. الربط المحلي إن وُجد بالسحابة
+        if (exMapping?.remoteId && (remoteExistingExercises || []).some(r => r.id === exMapping!.remoteId)) {
           remoteExId = exMapping.remoteId;
         } else {
-          const matchIdx = availableRemoteExercises.findIndex(r => r.title?.trim() === ex.title?.trim());
-          if (matchIdx >= 0) {
-            remoteExId = availableRemoteExercises[matchIdx].id;
-            availableRemoteExercises.splice(matchIdx, 1);
-          } else if (availableRemoteExercises.length > 0) {
-            remoteExId = availableRemoteExercises.shift()?.id;
+          // 2. طابقها مع المحلية بـ (kind, order_index) وسجّل الربط
+          const match = (remoteExistingExercises || []).find(
+            r => r.kind === ex.kind && r.order_index === targetOrder && !currentSecSyncedExIds.has(r.id)
+          );
+          if (match) {
+            remoteExId = match.id;
+            await upsertSyncMapping('practiceExercises', ex.id, remoteExId, exHash, isPublished);
+            linkedCount++;
           }
         }
 
@@ -1229,7 +1517,7 @@ export async function syncDocumentHierarchy(
           is_lead_exercise: !!ex.is_lead_exercise,
           primary_concept: ex.primary_concept || null,
           secondary_concepts: ex.secondary_concepts || [],
-          order_index: exIdx + 1,
+          order_index: targetOrder,
         };
 
         if (remoteExId) {
@@ -1239,38 +1527,41 @@ export async function syncDocumentHierarchy(
             .upsert(exPayload)
             .select('id')
             .single();
-          if (error) throw new Error(formatSupabaseErrorMessage('خطوة 4 [NewLessonSectionExercises]', error));
+          if (error) throw new Error(formatSupabaseErrorMessage('خطوة 4 [NewLessonSectionExercises Update]', error));
           remoteExId = data.id;
         } else {
+          // أدرج غير المطابَق فقط
           const { data, error } = await supabase
             .from('NewLessonSectionExercises')
             .insert(exPayload)
             .select('id')
             .single();
-          if (error) throw new Error(formatSupabaseErrorMessage('خطوة 4 [NewLessonSectionExercises]', error));
+          if (error) throw new Error(formatSupabaseErrorMessage('خطوة 4 [NewLessonSectionExercises Insert]', error));
           remoteExId = data.id;
+          addedCount++;
         }
 
         currentSecSyncedExIds.add(remoteExId!);
-        exerciseRemoteMap.set(ex.id, remoteExId!);
-        await saveSyncMapping('practiceExercises', ex.id, remoteExId!, exHash, isPublished);
+        exerciseRemoteMap.set(String(ex.id), remoteExId!);
+        await upsertSyncMapping('practiceExercises', ex.id, remoteExId!, exHash, isPublished);
 
         if (ex.family_id) {
           pendingExercisesForFamilyUpdate.push({
-            localExId: ex.id,
+            localExId: String(ex.id),
             remoteExId: remoteExId!,
             localFamilyId: ex.family_id,
           });
         }
       }
 
-      // تنظيف أي تمارين سحابية قديمة تم حذفها من هذه الفقرة
+      // واحذف الفائض السحابي الذي لا مقابل محلياً له
       const orphanExercises = (remoteExistingExercises || []).filter(r => !currentSecSyncedExIds.has(r.id));
       if (orphanExercises.length > 0) {
         const orphanExIds = orphanExercises.map(r => r.id);
         try {
           await supabase.from('NewExerciseStations').delete().in('exercise_id', orphanExIds);
           await supabase.from('NewLessonSectionExercises').delete().in('id', orphanExIds);
+          deletedCount += orphanExercises.length;
         } catch (delExErr) {
           console.warn('Could not clean up orphan exercises:', delExErr);
         }
@@ -1278,16 +1569,40 @@ export async function syncDocumentHierarchy(
     }
 
     // ---------------------------------------------------------
-    // الخطوة 5: مزامنة NewExerciseFamilies
+    // الخطوة 5: مزامنة NewExerciseFamilies (مطابقة بـ document_id, family_name)
     // ---------------------------------------------------------
     onProgress?.('مزامنة عائلات التمارين (NewExerciseFamilies)...', 68);
     const families = await db.exerciseFamilies.where('docId').equals(docId).toArray();
     const familyRemoteMap = new Map<string | number, string>();
 
+    const { data: remoteExistingFamilies } = await supabase
+      .from('NewExerciseFamilies')
+      .select('id, family_name')
+      .eq('document_id', remoteDocId);
+
+    const matchedRemoteFamIds = new Set<string>();
+
     for (const fam of families) {
       if (!fam.id) continue;
       const famHash = computeContentHash(fam);
-      const famMapping = await getSyncMapping('exerciseFamilies', fam.id);
+      const famMapping = await getMappingIfExists('exerciseFamilies', fam.id);
+
+      let remoteFamId: string | undefined = undefined;
+
+      if (famMapping?.remoteId && (remoteExistingFamilies || []).some(r => r.id === famMapping!.remoteId)) {
+        remoteFamId = famMapping.remoteId;
+      } else {
+        // طابقها بـ (document_id, family_name)
+        const targetFamName = normalizeTitle(fam.familyName || '');
+        const matchFam = (remoteExistingFamilies || []).find(
+          r => normalizeTitle(r.family_name || '') === targetFamName && !matchedRemoteFamIds.has(r.id)
+        );
+        if (matchFam) {
+          remoteFamId = matchFam.id;
+          await upsertSyncMapping('exerciseFamilies', fam.id, remoteFamId, famHash, isPublished);
+          linkedCount++;
+        }
+      }
 
       let remoteLeadExId: string | null = null;
       if (fam.leadExerciseId) {
@@ -1304,7 +1619,6 @@ export async function syncDocumentHierarchy(
         is_published: isPublished,
       };
 
-      let remoteFamId = famMapping?.remoteId;
       if (remoteFamId) {
         famPayload.id = remoteFamId;
         const { data, error } = await supabase
@@ -1322,10 +1636,12 @@ export async function syncDocumentHierarchy(
           .single();
         if (error) throw new Error(formatSupabaseErrorMessage('خطوة 5 [NewExerciseFamilies]', error));
         remoteFamId = data.id;
+        addedCount++;
       }
 
+      matchedRemoteFamIds.add(remoteFamId!);
       familyRemoteMap.set(fam.id, remoteFamId!);
-      await saveSyncMapping('exerciseFamilies', fam.id, remoteFamId!, famHash, isPublished);
+      await upsertSyncMapping('exerciseFamilies', fam.id, remoteFamId!, famHash, isPublished);
     }
 
     // ---------------------------------------------------------
@@ -1348,7 +1664,7 @@ export async function syncDocumentHierarchy(
     }
 
     // ---------------------------------------------------------
-    // الخطوة 7: مزامنة NewExerciseStations
+    // الخطوة 7: مزامنة NewExerciseStations (upsert بمفتاح exercise_id, station_order)
     // ---------------------------------------------------------
     onProgress?.('مزامنة محطات التمارين (NewExerciseStations)...', 84);
     const stations = await db.exerciseStations.toArray();
@@ -1396,12 +1712,26 @@ export async function syncDocumentHierarchy(
       }
     }
 
+    const remoteExIdsWithStations = Array.from(new Set(docStations.map(st => exerciseRemoteMap.get(String(st.exerciseId))).filter(Boolean) as string[]));
+    const { data: remoteExistingStations } = remoteExIdsWithStations.length > 0
+      ? await supabase
+          .from('NewExerciseStations')
+          .select('id, exercise_id, station_order')
+          .in('exercise_id', remoteExIdsWithStations)
+      : { data: [] };
+
+    const syncedRemoteStationIds = new Set<string>();
+
     for (const st of docStations) {
       const remoteExId = exerciseRemoteMap.get(String(st.exerciseId));
       if (!remoteExId) continue;
 
       const stHash = computeContentHash(st);
-      const stMapping = st.id ? await getSyncMapping('exerciseStations', st.id) : null;
+      const stMapping = st.id ? await getMappingIfExists('exerciseStations', st.id) : null;
+
+      const existingRemoteSt = (remoteExistingStations || []).find(
+        r => r.exercise_id === remoteExId && r.station_order === st.stationOrder
+      );
 
       const stPayload: any = {
         exercise_id: remoteExId,
@@ -1417,27 +1747,39 @@ export async function syncDocumentHierarchy(
         concept_map: st.conceptMap || null,
       };
 
-      let remoteStId = stMapping?.remoteId;
+      let remoteStId = stMapping?.remoteId || existingRemoteSt?.id;
       if (remoteStId) {
         stPayload.id = remoteStId;
-        const { data, error } = await supabase
-          .from('NewExerciseStations')
-          .upsert(stPayload)
-          .select('id')
-          .single();
-        if (error) throw new Error(formatSupabaseErrorMessage('خطوة 7 [NewExerciseStations]', error));
-        remoteStId = data.id;
+        if (existingRemoteSt && !stMapping?.remoteId) {
+          linkedCount++;
+        }
       } else {
-        const { data, error } = await supabase
-          .from('NewExerciseStations')
-          .upsert(stPayload, { onConflict: 'exercise_id,station_order' })
-          .select('id')
-          .single();
-        if (error) throw new Error(formatSupabaseErrorMessage('خطوة 7 [NewExerciseStations]', error));
-        remoteStId = data.id;
+        addedCount++;
       }
 
-      await saveSyncMapping('exerciseStations', st.id, remoteStId!, stHash, isPublished);
+      const { data, error } = await supabase
+        .from('NewExerciseStations')
+        .upsert(stPayload, { onConflict: 'exercise_id,station_order' })
+        .select('id')
+        .single();
+      if (error) throw new Error(formatSupabaseErrorMessage('خطوة 7 [NewExerciseStations]', error));
+      remoteStId = data.id;
+
+      syncedRemoteStationIds.add(remoteStId!);
+      if (st.id) {
+        await upsertSyncMapping('exerciseStations', st.id, remoteStId!, stHash, isPublished);
+      }
+    }
+
+    const orphanStations = (remoteExistingStations || []).filter(r => !syncedRemoteStationIds.has(r.id));
+    if (orphanStations.length > 0) {
+      const oIds = orphanStations.map(r => r.id);
+      try {
+        await supabase.from('NewExerciseStations').delete().in('id', oIds);
+        deletedCount += orphanStations.length;
+      } catch (stDelErr) {
+        console.warn('Could not clean up orphan stations:', stDelErr);
+      }
     }
 
     // ---------------------------------------------------------
@@ -1452,7 +1794,7 @@ export async function syncDocumentHierarchy(
         for (const q of quizzes) {
           if (!q.id) continue;
           const qHash = computeContentHash(q);
-          const qMapping = await getSyncMapping('unitQuizzes', q.id);
+          const qMapping = await getMappingIfExists('unitQuizzes', q.id);
           const payload: any = {
             document_id: remoteDocId,
             unit_id: unitId,
@@ -1496,17 +1838,17 @@ export async function syncDocumentHierarchy(
             }
           }
 
-          await saveSyncMapping('unitQuizzes', q.id, rId!, qHash, isPublished);
+          await upsertSyncMapping('unitQuizzes', q.id, rId!, qHash, isPublished);
         }
       })(),
 
-      // 8.2 Unit Mind Maps
+      // 8.2 Unit Mind Maps (UNIQUE unit_id: upsert مع onConflict: 'unit_id')
       (async () => {
         const maps = await db.unitMindMaps.where('docId').equals(docId).toArray();
         for (const m of maps) {
           if (!m.id) continue;
           const mHash = computeContentHash(m);
-          const mMapping = await getSyncMapping('unitMindMaps', m.id);
+          const mMapping = await getMappingIfExists('unitMindMaps', m.id);
           const payload: any = {
             document_id: remoteDocId,
             unit_id: unitId,
@@ -1523,21 +1865,21 @@ export async function syncDocumentHierarchy(
             if (error) throw new Error(formatSupabaseErrorMessage('[NewUnitMindMaps]', error));
             rId = data.id;
           } else {
-            const { data, error } = await supabase.from('NewUnitMindMaps').insert(payload).select('id').single();
+            const { data, error } = await supabase.from('NewUnitMindMaps').upsert(payload, { onConflict: 'unit_id' }).select('id').single();
             if (error) throw new Error(formatSupabaseErrorMessage('[NewUnitMindMaps]', error));
             rId = data.id;
           }
-          await saveSyncMapping('unitMindMaps', m.id, rId!, mHash, isPublished);
+          await upsertSyncMapping('unitMindMaps', m.id, rId!, mHash, isPublished);
         }
       })(),
 
-      // 8.3 Unit Comprehensive Reviews
+      // 8.3 Unit Comprehensive Reviews (UNIQUE unit_id: upsert مع onConflict: 'unit_id')
       (async () => {
         const revs = await db.unitComprehensiveReviews.where('docId').equals(docId).toArray();
         for (const r of revs) {
           if (!r.id) continue;
           const rHash = computeContentHash(r);
-          const rMapping = await getSyncMapping('unitComprehensiveReviews', r.id);
+          const rMapping = await getMappingIfExists('unitComprehensiveReviews', r.id);
           const payload: any = {
             document_id: remoteDocId,
             unit_id: unitId,
@@ -1557,11 +1899,11 @@ export async function syncDocumentHierarchy(
             if (error) throw new Error(formatSupabaseErrorMessage('[NewUnitComprehensiveReviews]', error));
             rId = data.id;
           } else {
-            const { data, error } = await supabase.from('NewUnitComprehensiveReviews').insert(payload).select('id').single();
+            const { data, error } = await supabase.from('NewUnitComprehensiveReviews').upsert(payload, { onConflict: 'unit_id' }).select('id').single();
             if (error) throw new Error(formatSupabaseErrorMessage('[NewUnitComprehensiveReviews]', error));
             rId = data.id;
           }
-          await saveSyncMapping('unitComprehensiveReviews', r.id, rId!, rHash, isPublished);
+          await upsertSyncMapping('unitComprehensiveReviews', r.id, rId!, rHash, isPublished);
         }
       })(),
 
@@ -1583,10 +1925,13 @@ export async function syncDocumentHierarchy(
       })(),
     ]);
 
-    onProgress?.('اكتملت المزامنة والاعتماد بنجاح! 🚀', 100);
+    const summaryText = `رُبطت ${linkedCount} عنصراً، أُضيف ${addedCount}، حُذف ${deletedCount}.`;
+    onProgress?.(`اكتملت المزامنة بنجاح! 🚀 (${summaryText})`, 100);
     return {
       success: true,
-      message: `تم اعتماد ونشر الوحدة "${doc.title}" وكافة محطاتها بنجاح إلى Supabase!`,
+      message: `تم اعتماد ونشر الوحدة "${doc.title}" وكافة محطاتها بنجاح إلى Supabase! (${summaryText})`,
+      syncedCount: linkedCount + addedCount,
+      details: { linkedCount, addedCount, deletedCount },
     };
   } catch (err: any) {
     console.error('Error syncing document hierarchy:', err);
@@ -1716,19 +2061,31 @@ export async function syncComprehensiveTest(
 
     const isPublished = !isDraft;
     const testHash = computeTestHash(test);
-    const mapping = await getSyncMapping('tests', testId);
+    const mapping = await getMappingIfExists('NewTests', String(testId));
 
-    let topicLabel = test.topic || test.scope || null;
-    if (!topicLabel) {
-      if (derivedScope === 'part') {
+    let topicLabel = test.topic || (test.scope !== 'عام' && test.scope !== 'شامل' ? test.scope : null);
+    if (!topicLabel || topicLabel === 'عام' || topicLabel === 'شامل') {
+      if (derivedScope === 'unit') {
+        topicLabel = test.unit ? `اختبار وحدة: ${test.unit}` : 'اختبار وحدة';
+      } else if (derivedScope === 'part') {
         topicLabel = test.unit ? `${test.part || 'جزء كامل'}: ${test.unit}` : `اختبار جزء كامل: ${test.part || ''}`;
       } else if (derivedScope === 'subject_comprehensive') {
-        topicLabel = test.unit || 'اختبار شامل لجميع الوحدات';
+        topicLabel = test.unit && !isComprehensiveUnitKeyword(test.unit) ? test.unit : 'اختبار شامل لجميع الوحدات';
+      }
+    }
+
+    const currentTitle = (test.title || test.testData?.title || '').trim();
+    if (test.testData && test.testData.title !== currentTitle) {
+      test.testData.title = currentTitle;
+      try {
+        await db.tests.update(testId, { testData: test.testData, title: currentTitle });
+      } catch (e) {
+        console.warn('Could not sync testData.title in local db:', e);
       }
     }
 
     const testPayload: any = {
-      title: test.testData?.title || test.title,
+      title: currentTitle,
       unit_id: unitRemoteId,
       unit_ids: unitRemoteIds,
       difficulty: test.difficulty,
@@ -1744,42 +2101,47 @@ export async function syncComprehensiveTest(
     };
 
     let remoteTestId = mapping?.remoteId || (test as any).remoteId;
-    let purgedDuplicatesCount = 0;
 
-    // فحص شامل لرصد وتطهير أي سجلات مكررة في NewTests تحمل نفس العنوان
-    try {
+    if (!remoteTestId) {
+      // فحص التكرار في NewTests: unit_id + العنوان (أو scope + العنوان للشامل)
       let checkQuery = supabase
         .from('NewTests')
-        .select('id, created_at')
-        .eq('title', testPayload.title);
+        .select('id, title, created_at, unit_id, scope');
 
       if (unitRemoteId) {
         checkQuery = checkQuery.eq('unit_id', unitRemoteId);
+      } else if (derivedScope) {
+        checkQuery = checkQuery.eq('scope', derivedScope);
       }
 
-      const { data: existingRemote, error: checkErr } = await checkQuery.order('created_at', { ascending: false });
-      if (!checkErr && existingRemote && existingRemote.length > 0) {
-        // إذا كان remoteTestId غير محدد أو لم يعد موجوداً، نعتمد أحدث سجل
-        if (!remoteTestId || !existingRemote.some(r => r.id === remoteTestId)) {
-          remoteTestId = existingRemote[0].id;
-        }
+      const { data: remoteTests, error: checkErr } = await checkQuery;
+      if (checkErr) throw new Error(`تعذّر فحص التكرار للاختبار: ${checkErr.message}`);
 
-        // تحديد أي سجلات مكررة أخرى وحذفها فوراً عبر الحذف التتابعي الآمن
-        const duplicateIds = existingRemote.filter(r => r.id !== remoteTestId).map(r => r.id);
-        if (duplicateIds.length > 0) {
-          purgedDuplicatesCount = duplicateIds.length;
-          console.warn(`تم رصد ${duplicateIds.length} سجلات مكررة سابقة لاختبار "${testPayload.title}". جاري تنظيفها تلقائياً:`, duplicateIds);
-          for (const dupId of duplicateIds) {
-            await deleteRemoteTestCompletely(dupId);
-          }
-        }
+      const targetTitle = normalizeTitle(testPayload.title);
+      const matches = (remoteTests || []).filter(t => normalizeTitle(t.title || '') === targetTitle);
+
+      if (matches.length > 1) {
+        throw new Error(
+          `يوجد ${matches.length} اختبارات مكررة بعنوان "${testPayload.title}" في السحابة. ` +
+          `نظّفها أولاً ثم أعد المزامنة.`
+        );
       }
-    } catch (cleanErr) {
-      console.warn('تحذير أثناء فحص وتنظيف السجلات المكررة:', cleanErr);
+
+      if (matches.length === 1) {
+        // لا تتصرف بصمت: اطلب تأكيداً صريحاً من المستخدم
+        const confirmed = await confirmDialog(
+          `يوجد في السحابة اختبار بنفس العنوان "${testPayload.title}" ` +
+          `(أُنشئ ${new Date(matches[0].created_at).toLocaleString('ar')}).\n` +
+          `هل تريد ربط هذه النسخة المحلية به وتحديثه بدل إنشاء نسخة جديدة؟`
+        );
+        if (!confirmed) throw new Error('أُلغيت المزامنة لتفادي التكرار');
+        await upsertSyncMapping('NewTests', String(testId), matches[0].id);
+        remoteTestId = matches[0].id;
+      }
     }
 
     if (remoteTestId) {
-      // تحديث السجل القائم حصراً لمنع إنشاء سجل جديد إطلاقاً
+      // تحديث السجل القائم حصراً
       const { data, error } = await supabase
         .from('NewTests')
         .update(testPayload)
@@ -1789,7 +2151,7 @@ export async function syncComprehensiveTest(
       if (error) throw new Error(formatSupabaseErrorMessage('خطوة 3 [تحديث NewTests]', error));
       remoteTestId = data.id;
     } else {
-      // إدراج سجل جديد فقط عند التأكد التام من عدم وجوده مسبقاً
+      // إدراج سجل جديد فقط عند عدم وجود أي تطابق مسبق
       const { data, error } = await supabase
         .from('NewTests')
         .insert(testPayload)
@@ -1798,6 +2160,8 @@ export async function syncComprehensiveTest(
       if (error) throw new Error(formatSupabaseErrorMessage('خطوة 3 [إدراج NewTests]', error));
       remoteTestId = data.id;
     }
+
+    await upsertSyncMapping('NewTests', String(testId), remoteTestId!, testHash, isPublished);
 
     // -------------------------------------------------------------
     // الخطوة 4: مزامنة الأقسام والأسئلة (الأسئلة + سلم التصحيح)
@@ -1812,10 +2176,14 @@ export async function syncComprehensiveTest(
     }
 
     const currentSectionRemoteIds = new Set<string>();
+    let hasLocalQuestionsUpdated = false;
 
     for (let sIdx = 0; sIdx < test.testData.sections.length; sIdx++) {
       const section = test.testData.sections[sIdx];
-      const secType = section.sectionType || 'questions';
+      let secType = section.sectionType || 'questions';
+      if (secType === 'shortAnswer' || secType === 'short_answer') {
+        secType = 'questions';
+      }
       const secTitle = section.title || `القسم ${sIdx + 1}`;
       const secOrder = sIdx + 1;
 
@@ -1870,10 +2238,17 @@ export async function syncComprehensiveTest(
             throw new Error(`السؤال رقم ${qIdx + 1} في قسم "${secTitle}" بلا سلم تصحيح — لا يمكن نشره`);
           }
 
+          // توحيد نص السؤال والطلبات كاملة في حقل text لضمان عدم ضياع الطلبات سحابياً
+          const fullQuestionText = getQuestionFullText(q) || q.text || '';
+          if (q.text !== fullQuestionText) {
+            q.text = fullQuestionText;
+            hasLocalQuestionsUpdated = true;
+          }
+
           questionsToInsert.push({
             section_id: sectionRemoteId,
             order_index: qIdx + 1,
-            text: q.text || '',
+            text: fullQuestionText,
             options: q.options || null,
             correct_option_index: q.correctOptionIndex ?? null,
             sub_questions: q.subQuestions || null,
@@ -1890,6 +2265,14 @@ export async function syncComprehensiveTest(
         if (insQErr) {
           throw new Error(formatSupabaseErrorMessage('خطوة 4 [إدراج NewTestQuestions]', insQErr));
         }
+      }
+    }
+
+    if (hasLocalQuestionsUpdated) {
+      try {
+        await db.tests.update(testId, { testData: test.testData });
+      } catch (updErr) {
+        console.warn('Could not update testData with unified questions locally:', updErr);
       }
     }
 
@@ -1912,8 +2295,7 @@ export async function syncComprehensiveTest(
     } catch {
       // ignore
     }
-    const purgeNote = purgedDuplicatesCount > 0 ? ` (وتم تلقائياً تنظيف ${purgedDuplicatesCount} سجلات مكررة سابقة)` : '';
-    return { success: true, message: `تم اعتماد ونشر الاختبار "${test.title}" بنجاح!${purgeNote}` };
+    return { success: true, message: `تم اعتماد ونشر الاختبار "${currentTitle}" بنجاح!` };
   } catch (err: any) {
     return { success: false, message: err.message || 'فشل مزامنة الاختبار' };
   }
@@ -2245,10 +2627,134 @@ export async function cleanupAllDuplicateTests(): Promise<{
 export const syncSingleTest = syncComprehensiveTest;
 
 export async function syncSingleQuestionBank(qbId: number, isDraft: boolean = false): Promise<SyncResult> {
-  return {
-    success: false,
-    message: 'قسم بنك الأسئلة مستثنى حالياً من المزامنة لإعادة هيكلة القسم بالكامل.',
-  };
+  const supabase = getSupabaseClient();
+  if (!supabase) return { success: false, message: 'عميل Supabase غير مهيأ' };
+
+  try {
+    const qb = await db.questionBanks.get(qbId);
+    if (!qb) throw new Error(`بنك الأسئلة ${qbId} غير موجود محلياً`);
+
+    const isPublished = !isDraft;
+    const qbHash = computeContentHash(qb);
+    let mapping = await getMappingIfExists('NewQuestionBanks', String(qbId));
+
+    const { unitId } = await resolveTaxonomyHierarchy({
+      country: qb.country,
+      grade: qb.grade,
+      subject: qb.subject,
+      unit: qb.unit,
+      part: qb.part,
+    });
+
+    if (!mapping && unitId) {
+      // المفتاح الطبيعي: unit_id (بنك واحد لكل وحدة)
+      const { data: existingBanks, error: chkErr } = await supabase
+        .from('NewQuestionBanks')
+        .select('id, title, created_at, unit_id')
+        .eq('unit_id', unitId);
+
+      if (chkErr) throw new Error(`تعذّر فحص التكرار لبنك الأسئلة: ${chkErr.message}`);
+
+      if (existingBanks && existingBanks.length > 1) {
+        throw new Error(
+          `يوجد ${existingBanks.length} بنوك أسئلة لهذه الوحدة في السحابة. نظّفها أولاً ثم أعد المزامنة.`
+        );
+      }
+
+      if (existingBanks && existingBanks.length === 1) {
+        const confirmed = await confirmDialog(
+          `يوجد في السحابة بنك أسئلة لهذه الوحدة بعنوان "${existingBanks[0].title}" ` +
+          `(أُنشئ ${new Date(existingBanks[0].created_at).toLocaleString('ar')}).\n` +
+          `هل تريد ربط هذه النسخة المحلية به وتحديثه بدل إنشاء نسخة جديدة؟`
+        );
+        if (!confirmed) throw new Error('أُلغيت المزامنة لتفادي التكرار');
+        await upsertSyncMapping('NewQuestionBanks', String(qbId), existingBanks[0].id);
+        mapping = await getMappingIfExists('NewQuestionBanks', String(qbId));
+      }
+    }
+
+    const payload: any = {
+      unit_id: unitId,
+      title: qb.title,
+      summary_text: qb.topic || '',
+      is_published: false,
+    };
+
+    let remoteId = mapping?.remoteId;
+    if (remoteId) {
+      payload.id = remoteId;
+      const { data, error } = await supabase.from('NewQuestionBanks').upsert(payload).select('id').single();
+      if (error) throw error;
+      remoteId = data.id;
+    } else {
+      const { data, error } = await supabase.from('NewQuestionBanks').insert(payload).select('id').single();
+      if (error) throw error;
+      remoteId = data.id;
+    }
+
+    // Sync question items into NewQuestionBankItems if present
+    let itemsCount = 0;
+    if (qb.items && qb.items.length > 0) {
+      const mcqItems = qb.items.filter((item: any) => item.type !== 'essay');
+      if (mcqItems.length > 0) {
+        const itemPayloads = mcqItems.map((item: any, idx: number) => {
+          const sourceKey = item.id || `mcq_${idx + 1}`;
+          const cleanedOpts = (item.subParts || []).map((s: string) => 
+            s.replace(/^[\s(]*[أبجدهئطك]\s*[\-)\.]\s*/, '').trim()
+          );
+          const solutionText = (item.solution && item.solution.trim()) ? item.solution.trim() : '—';
+          const topicText = (item.topic && item.topic.trim()) ? item.topic.trim() : (qb.topic || 'عام');
+          const diff = Math.max(1, Math.min(4, Number(item.difficulty) || 2));
+
+          return {
+            bank_id: remoteId,
+            source_key: sourceKey,
+            item_type: 'mcq',
+            topic: topicText,
+            difficulty: diff,
+            question: item.question || '',
+            sub_parts: cleanedOpts,
+            correct_index: 0,
+            solution: solutionText,
+            ai_guidance: item.aiGuidance || null,
+            svg_code: item.svgCode || null,
+            order_index: item.order || (idx + 1)
+          };
+        });
+
+        const { data: upsertData, error: itemsErr, status: upsertStatus } = await (supabase as any)
+          .from('NewQuestionBankItems')
+          .upsert(itemPayloads, { onConflict: 'bank_id,source_key' })
+          .select();
+
+        if (itemsErr) {
+          throw new Error(`فشلت مزامنة أسئلة البنك في NewQuestionBankItems (رمز HTTP ${upsertStatus}): ${itemsErr.message}`);
+        }
+
+        const returnedCount = Array.isArray(upsertData) ? upsertData.length : 0;
+        if (returnedCount !== itemPayloads.length) {
+          throw new Error(`عدد الأسئلة المُعادة من السحابة (${returnedCount}) لا يطابق عدد الأسئلة المُرسلة (${itemPayloads.length})`);
+        }
+        itemsCount = returnedCount;
+      }
+    }
+
+    // Rule 6: Set is_published = true only after successfully writing questions
+    if (isPublished) {
+      await supabase
+        .from('NewQuestionBanks')
+        .update({ is_published: true, updated_at: new Date().toISOString() })
+        .eq('id', remoteId);
+    }
+
+    await upsertSyncMapping('NewQuestionBanks', String(qbId), remoteId!, qbHash, isPublished);
+    return { 
+      success: true, 
+      message: `تمت مزامنة بنك الأسئلة "${qb.title}" بنجاح (${itemsCount} سؤالاً مسجلاً في NewQuestionBankItems)!` 
+    };
+  } catch (err: any) {
+    return { success: false, message: err.message || 'فشل مزامنة بنك الأسئلة' };
+  }
 }
 
 export async function syncSingleExamSummary(summaryId: number, isDraft: boolean = false): Promise<SyncResult> {
@@ -2261,7 +2767,7 @@ export async function syncSingleExamSummary(summaryId: number, isDraft: boolean 
 
     const isPublished = !isDraft;
     const sumHash = computeContentHash(sum);
-    const mapping = await getSyncMapping('examSummaries', summaryId);
+    let mapping = await getMappingIfExists('NewExamSummaries', String(summaryId));
 
     const { subjectId } = await resolveTaxonomyHierarchy({
       country: sum.country,
@@ -2270,6 +2776,37 @@ export async function syncSingleExamSummary(summaryId: number, isDraft: boolean 
       unit: sum.unit,
       part: sum.part,
     });
+
+    if (!mapping && subjectId) {
+      // المفتاح الطبيعي: subject_id + العنوان بعد التطبيع
+      const { data: remoteSummaries, error: chkErr } = await supabase
+        .from('NewExamSummaries')
+        .select('id, title, created_at')
+        .eq('subject_id', subjectId);
+
+      if (chkErr) throw new Error(`تعذّر فحص التكرار للملخص الامتحاني: ${chkErr.message}`);
+
+      const targetTitle = normalizeTitle(sum.title);
+      const matches = (remoteSummaries || []).filter(s => normalizeTitle(s.title || '') === targetTitle);
+
+      if (matches.length > 1) {
+        throw new Error(
+          `يوجد ${matches.length} ملخصات مكررة بعنوان "${sum.title}" في السحابة. نظّفها أولاً ثم أعد المزامنة.`
+        );
+      }
+
+      if (matches.length === 1) {
+        // لا تتصرف بصمت: اطلب تأكيداً صريحاً من المستخدم
+        const confirmed = await confirmDialog(
+          `يوجد في السحابة ملخص امتحاني بنفس العنوان "${sum.title}" ` +
+          `(أُنشئ ${new Date(matches[0].created_at).toLocaleString('ar')}).\n` +
+          `هل تريد ربط هذه النسخة المحلية به وتحديثه بدل إنشاء نسخة جديدة؟`
+        );
+        if (!confirmed) throw new Error('أُلغيت المزامنة لتفادي التكرار');
+        await upsertSyncMapping('NewExamSummaries', String(summaryId), matches[0].id);
+        mapping = await getMappingIfExists('NewExamSummaries', String(summaryId));
+      }
+    }
 
     const payload: any = {
       subject_id: subjectId,
@@ -2290,37 +2827,80 @@ export async function syncSingleExamSummary(summaryId: number, isDraft: boolean 
       remoteId = data.id;
     }
 
-    await saveSyncMapping('examSummaries', summaryId, remoteId!, sumHash, isPublished);
+    await upsertSyncMapping('NewExamSummaries', String(summaryId), remoteId!, sumHash, isPublished);
     return { success: true, message: `تم اعتماد ونشر الملخص الامتحاني "${sum.title}" بنجاح!` };
   } catch (err: any) {
     return { success: false, message: err.message || 'فشل مزامنة الملخص' };
   }
 }
 
-export async function syncSinglePastPaper(paperId: number, isDraft: boolean = false): Promise<SyncResult> {
+export async function syncSinglePastPaper(paperId: number | string, isDraft: boolean = false): Promise<SyncResult> {
   const supabase = getSupabaseClient();
   if (!supabase) return { success: false, message: 'عميل Supabase غير مهيأ' };
 
   try {
-    const paper = await db.pastPapers.get(paperId);
+    const numId = Number(paperId);
+    const paper = await db.pastPapers.get(numId);
     if (!paper) throw new Error(`دورة الامتحان ${paperId} غير موجودة محلياً`);
+
+    // التحقق الصارم قبل الإرسال
+    if (paper.questions && paper.questions.length > 0) {
+      for (const q of paper.questions) {
+        if (!q.solution?.trim()) throw new Error(`"${q.orderTitle || 'السؤال'}" بلا حل — لا يمكن نشره`);
+        if (!['essay', 'mcq'].includes(q.type)) throw new Error(`نوع سؤال غير معروف: ${q.type}`);
+      }
+    }
 
     const isPublished = !isDraft;
     const paperHash = computeContentHash(paper);
-    const mapping = await getSyncMapping('pastPapers', paperId);
+    let mapping = await getMappingIfExists('NewPastPapers', String(numId));
 
-    const { subjectId } = await resolveTaxonomyHierarchy({
-      country: paper.country,
-      grade: paper.grade,
-      subject: paper.subject,
-      unit: paper.unit,
-      part: paper.part,
-    });
+    // 1. استنتاج subject_id بالاسم
+    const subjectId = await resolveSubjectRemoteIdByName(
+      paper.subject || 'الرياضيات',
+      paper.grade,
+      paper.country
+    );
 
+    const examYearStr = String(paper.year || new Date().getFullYear());
+
+    if (!mapping && subjectId) {
+      // المفتاح الطبيعي: subject_id + exam_year + العنوان بعد التطبيع
+      const { data: remotePapers, error: chkErr } = await supabase
+        .from('NewPastPapers')
+        .select('id, title, exam_year, created_at')
+        .eq('subject_id', subjectId)
+        .eq('exam_year', examYearStr);
+
+      if (chkErr) throw new Error(`تعذّر فحص التكرار لدورة الامتحان: ${chkErr.message}`);
+
+      const targetTitle = normalizeTitle(paper.title);
+      const matches = (remotePapers || []).filter(p => normalizeTitle(p.title || '') === targetTitle);
+
+      if (matches.length > 1) {
+        throw new Error(
+          `يوجد ${matches.length} دورات امتحانية مكررة لعام ${examYearStr} بعنوان "${paper.title}" في السحابة. نظّفها أولاً ثم أعد المزامنة.`
+        );
+      }
+
+      if (matches.length === 1) {
+        // لا تتصرف بصمت: اطلب تأكيداً صريحاً من المستخدم
+        const confirmed = await confirmDialog(
+          `توجد في السحابة دورة امتحانية لعام ${examYearStr} بنفس العنوان "${paper.title}" ` +
+          `(أُنشئت ${new Date(matches[0].created_at).toLocaleString('ar')}).\n` +
+          `هل تريد ربط هذه النسخة المحلية بها وتحديثها بدل إنشاء نسخة جديدة؟`
+        );
+        if (!confirmed) throw new Error('أُلغيت المزامنة لتفادي التكرار');
+        await upsertSyncMapping('NewPastPapers', String(numId), matches[0].id);
+        mapping = await getMappingIfExists('NewPastPapers', String(numId));
+      }
+    }
+
+    // 2. أدرج/حدّث NewPastPapers: title, subject_id, exam_year (من year), is_published
     const payload: any = {
       subject_id: subjectId,
       title: paper.title,
-      exam_year: String(paper.year || new Date().getFullYear()),
+      exam_year: examYearStr,
       is_published: isPublished,
     };
 
@@ -2336,28 +2916,55 @@ export async function syncSinglePastPaper(paperId: number, isDraft: boolean = fa
       remoteId = data.id;
     }
 
-    // Sync questions
+    // 3. لكل عنصر في questions[]، بترتيب الظهور في المصفوفة (index + 1 = order_index)
     if (paper.questions && paper.questions.length > 0) {
-      await supabase.from('NewPastPaperQuestions').delete().eq('paper_id', remoteId);
-      for (let i = 0; i < paper.questions.length; i++) {
-        const q = paper.questions[i];
+      for (let index = 0; index < paper.questions.length; index++) {
+        const q = paper.questions[index];
         const qPayload: any = {
           paper_id: remoteId,
-          order_index: i + 1,
+          order_index: index + 1,
+          order_title: q.orderTitle,
+          section_type: deriveSectionType(q.orderTitle),
           topic: q.topic || null,
-          item_type: q.type || 'problem',
-          question: q.question || '',
-          solution: q.solution || '',
-          sub_parts: q.subParts || null,
-          svg_code: q.svgCode || null,
-          solution_svg_code: q.solutionSvgCode || null,
+          item_type: q.type,
+          question: q.question,
+          sub_parts: (q.subParts && q.subParts.length > 0) ? q.subParts : null,
+          solution: q.solution,
+          svg_code: null,
+          solution_svg_code: null,
         };
-        await supabase.from('NewPastPaperQuestions').insert(qPayload);
+
+        const { error: upsertErr } = await supabase
+          .from('NewPastPaperQuestions')
+          .upsert(qPayload, { onConflict: 'paper_id, order_index' });
+
+        if (upsertErr) {
+          const { error: insertErr } = await supabase
+            .from('NewPastPaperQuestions')
+            .insert(qPayload);
+          if (insertErr) throw insertErr;
+        }
+      }
+
+      // حذف أي أسئلة فائضة في السحابة
+      try {
+        const maxOrder = paper.questions.length;
+        await supabase
+          .from('NewPastPaperQuestions')
+          .delete()
+          .eq('paper_id', remoteId)
+          .gt('order_index', maxOrder);
+      } catch (delErr) {
+        console.warn('Could not delete excess past paper questions:', delErr);
       }
     }
 
-    await saveSyncMapping('pastPapers', paperId, remoteId!, paperHash, isPublished);
-    return { success: true, message: `تم اعتماد ونشر دورة الامتحان "${paper.title}" بنجاح!` };
+    await upsertSyncMapping('NewPastPapers', String(numId), remoteId!, paperHash, isPublished);
+    return { 
+      success: true, 
+      message: `تم اعتماد ونشر دورة الامتحان "${paper.title}" بنجاح في Supabase (${paper.questions?.length || 0} أسئلة)!`,
+      details: { remoteId }
+    };
   } catch (err: any) {
     return { success: false, message: err.message || 'فشل مزامنة الدورة الامتحانية' };
   }
@@ -2373,11 +2980,11 @@ export async function syncSingleUnitQuiz(quizId: number, isDraft: boolean = fals
 
     const isPublished = !isDraft;
     const qHash = computeContentHash(q);
-    const mapping = await getSyncMapping('unitQuizzes', quizId);
+    const mapping = await getMappingIfExists('NewUnitQuizzes', String(quizId));
 
     let remoteDocId: string | null = null;
     if (q.docId) {
-      const docMapping = await getSyncMapping('documents', q.docId);
+      const docMapping = await getMappingIfExists('NewDocuments', String(q.docId));
       remoteDocId = docMapping?.remoteId || null;
     }
 
@@ -2432,7 +3039,7 @@ export async function syncSingleUnitQuiz(quizId: number, isDraft: boolean = fals
       }
     }
 
-    await saveSyncMapping('unitQuizzes', quizId, remoteId!, qHash, isPublished);
+    await upsertSyncMapping('NewUnitQuizzes', String(quizId), remoteId!, qHash, isPublished);
     return { success: true, message: `تم اعتماد ونشر اختبار الوحدة "${q.title}" بنجاح!` };
   } catch (err: any) {
     return { success: false, message: err.message || 'فشل مزامنة اختبار الوحدة' };
@@ -2449,13 +3056,13 @@ export async function syncSingleUnitMindMap(mindMapId: number, isDraft: boolean 
 
     const isPublished = !isDraft;
     const mHash = computeContentHash(m);
-    const mapping = await getSyncMapping('unitMindMaps', mindMapId);
+    const mapping = await getMappingIfExists('NewUnitMindMaps', String(mindMapId));
 
     let remoteDocId: string | null = null;
     let unitId: string | null = null;
 
     if (m.docId) {
-      const docMapping = await getSyncMapping('documents', m.docId);
+      const docMapping = await getMappingIfExists('NewDocuments', String(m.docId));
       remoteDocId = docMapping?.remoteId || null;
       const doc = await db.documents.get(m.docId);
       if (doc) {
@@ -2487,12 +3094,13 @@ export async function syncSingleUnitMindMap(mindMapId: number, isDraft: boolean 
       if (error) throw error;
       remoteId = data.id;
     } else {
-      const { data, error } = await supabase.from('NewUnitMindMaps').insert(payload).select('id').single();
+      // UNIQUE موجود على unit_id: استخدم upsert مع onConflict: 'unit_id'
+      const { data, error } = await supabase.from('NewUnitMindMaps').upsert(payload, { onConflict: 'unit_id' }).select('id').single();
       if (error) throw error;
       remoteId = data.id;
     }
 
-    await saveSyncMapping('unitMindMaps', mindMapId, remoteId!, mHash, isPublished);
+    await upsertSyncMapping('NewUnitMindMaps', String(mindMapId), remoteId!, mHash, isPublished);
     return { success: true, message: `تم اعتماد ونشر الخريطة الذهنية "${m.title}" بنجاح!` };
   } catch (err: any) {
     return { success: false, message: err.message || 'فشل مزامنة الخريطة الذهنية' };
@@ -2509,13 +3117,13 @@ export async function syncSingleUnitComprehensiveReview(reviewId: number, isDraf
 
     const isPublished = !isDraft;
     const rHash = computeContentHash(r);
-    const mapping = await getSyncMapping('unitComprehensiveReviews', reviewId);
+    const mapping = await getMappingIfExists('NewUnitComprehensiveReviews', String(reviewId));
 
     let remoteDocId: string | null = null;
     let unitId: string | null = null;
 
     if (r.docId) {
-      const docMapping = await getSyncMapping('documents', r.docId);
+      const docMapping = await getMappingIfExists('NewDocuments', String(r.docId));
       remoteDocId = docMapping?.remoteId || null;
       const doc = await db.documents.get(r.docId);
       if (doc) {
@@ -2558,12 +3166,13 @@ export async function syncSingleUnitComprehensiveReview(reviewId: number, isDraf
       if (error) throw error;
       remoteId = data.id;
     } else {
-      const { data, error } = await supabase.from('NewUnitComprehensiveReviews').insert(payload).select('id').single();
+      // UNIQUE موجود على unit_id: استخدم upsert مع onConflict: 'unit_id'
+      const { data, error } = await supabase.from('NewUnitComprehensiveReviews').upsert(payload, { onConflict: 'unit_id' }).select('id').single();
       if (error) throw error;
       remoteId = data.id;
     }
 
-    await saveSyncMapping('unitComprehensiveReviews', reviewId, remoteId!, rHash, isPublished);
+    await upsertSyncMapping('NewUnitComprehensiveReviews', String(reviewId), remoteId!, rHash, isPublished);
     return { success: true, message: `تم اعتماد ونشر المراجعة الشاملة "${r.title}" بنجاح!` };
   } catch (err: any) {
     return { success: false, message: err.message || 'فشل مزامنة المراجعة الشاملة' };

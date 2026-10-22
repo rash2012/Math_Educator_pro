@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, type Document, type LessonSection, type PracticeExercise } from '../db';
 import { loadUnitExerciseFamilies, saveExerciseFamilyAtomic } from '../db/exerciseFamiliesRPC';
@@ -12,7 +12,10 @@ import {
   generatePracticeExerciseSvgAI,
   editPracticeExerciseSvgAI,
   verifyPracticeExerciseSolutionAI,
-  verifyLessonSectionAI
+  verifyLessonSectionAI,
+  generateSingleTheoreticalLessonFromPdf,
+  generateSinglePracticeLessonFromPdf,
+  extractPracticeExerciseFromImage
 } from '../services/gemini';
 import { 
   extractPdfText, 
@@ -51,7 +54,12 @@ import {
   Cloud,
   Video,
   ExternalLink,
-  Play
+  Play,
+  Camera,
+  FileText,
+  UploadCloud,
+  Hash,
+  Image as ImageIcon
 } from 'lucide-react';
 import { CustomDialog } from './ui/CustomDialog';
 import { AcademicMetadataFields } from './AcademicMetadataFields';
@@ -65,6 +73,7 @@ import { UnifiedPageHeader } from './common/UnifiedPageHeader';
 import { SyncControlButton } from './SyncControlButton';
 import { SyncStatusBadge } from './SyncStatusBadge';
 import { UnitSyncIndicator } from './UnitSyncIndicator';
+import { LocalDatabaseIdBadge } from './common/LocalDatabaseIdBadge';
 
 export const LessonSummariesDashboard: React.FC = () => {
   // 1. Fetch from Dexie
@@ -191,6 +200,78 @@ export const LessonSummariesDashboard: React.FC = () => {
     secondaryFieldValue?: string;
   } | null>(null);
   const [isSubBlockAiRephrasing, setIsSubBlockAiRephrasing] = useState(false);
+  const [isSavingSubBlock, setIsSavingSubBlock] = useState(false);
+  const [subBlockSaveNotice, setSubBlockSaveNotice] = useState<string | null>(null);
+  const [activeSubBlockEditorField, setActiveSubBlockEditorField] = useState<'primary' | 'secondary'>('primary');
+  const subBlockPrimaryTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const subBlockSecondaryTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // 🔢 Numbering & Step Icons for Lessons and Exercises (الأرقام والخطوات الترقيمية الأنيقة)
+  const NUMBERING_ICONS = [
+    '①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩',
+    '❶', '❷', '❸', '❹', '❺',
+    'أ)', 'ب)', 'ج)', 'د)', 'هـ)',
+    '◀', '➔'
+  ];
+
+  // 🏷️ Paragraph Icons and Markers for Lesson Summaries & Manual Editing (الأيقونات الاحترافية)
+  const PARAGRAPH_ICONS_LIST = [
+    { icon: '💡', name: 'إضاءة / فكرة ذكية' },
+    { icon: '📍', name: 'نقطة انطلاق هامة' },
+    { icon: '📌', name: 'تثبيت وملاحظة أساسية' },
+    { icon: '⚠️', name: 'مطب امتحاني وتحذير' },
+    { icon: '⭐', name: 'ملاحظة ذهبية هامة' },
+    { icon: '🎯', name: 'الهدف والمطلوب' },
+    { icon: '🔑', name: 'مفتاح الحل' },
+    { icon: '🔍', name: 'استنتاج وتدقيق' },
+    { icon: '✅', name: 'صواب / خطوة صحيحة' },
+    { icon: '❌', name: 'خطأ شائع ومحظور' },
+    { icon: '⚡', name: 'طريقة سريعة ومختصرة' },
+    { icon: '📐', name: 'هندسة وفراغية' },
+    { icon: '📊', name: 'جدول بياني أو اطراد' },
+    { icon: '📝', name: 'تمرين وتطبيق' },
+    { icon: '🏆', name: 'قاعدة ذهبية' },
+    { icon: '💎', name: 'نتيجة جوهرية' },
+    { icon: '🧩', name: 'ربط مفاهيمي' },
+    { icon: '🔄', name: 'تكافؤ وتناظر' },
+    { icon: '📈', name: 'تزايد واطراد' },
+    { icon: '📉', name: 'تناقص' },
+    { icon: '🔹', name: 'نقطة فرعية' },
+    { icon: '🔸', name: 'تنبيه فرعي' },
+    { icon: '🏷️', name: 'مبرهنة أو تعريف' },
+    { icon: '💬', name: 'إرشاد وتوضيح' },
+    { icon: '❓', name: 'سؤال استكشافي' },
+    { icon: '❗', name: 'تأكيد وتنبيه' },
+  ];
+
+  const QUICK_PARAGRAPH_ICONS = ['💡', '📍', '📌', '⚠️', '⭐', '🎯', '🔑', '✅', '❌', '⚡', '📐', '🔹', '🏆', '💎'];
+
+  // 📄 Add Lesson Modal (Theoretical or Practice from Scratch or PDF)
+  const [addLessonModal, setAddLessonModal] = useState<{
+    isOpen: boolean;
+    type: 'theory' | 'practice';
+  } | null>(null);
+  const [pdfLessonFile, setPdfLessonFile] = useState<File | null>(null);
+  const [isProcessingPdfLesson, setIsProcessingPdfLesson] = useState(false);
+  const [pdfLessonProgress, setPdfLessonProgress] = useState<string>('');
+
+  // 📸 Add Exercise from Image State
+  const [addExerciseChoiceModal, setAddExerciseChoiceModal] = useState<{
+    isOpen: boolean;
+    sectionId: number;
+  } | null>(null);
+  const [isExtractingExerciseImage, setIsExtractingExerciseImage] = useState(false);
+  const [exerciseImageExtractingProgress, setExerciseImageExtractingProgress] = useState<string>('');
+  const exerciseImageFileInputRef = useRef<HTMLInputElement>(null);
+  const [targetExerciseSectionId, setTargetExerciseSectionId] = useState<number | null>(null);
+
+  // Exercise modal textarea refs & active field tracking for cursor-aware symbol & numbering insertion
+  const [activeExModalField, setActiveExModalField] = useState<'question' | 'strategy' | 'solution' | 'svg'>('question');
+  const exQuestionRef = useRef<HTMLTextAreaElement>(null);
+  const exStrategyRef = useRef<HTMLTextAreaElement>(null);
+  const exSolutionRef = useRef<HTMLTextAreaElement>(null);
+  const exSvgRef = useRef<HTMLTextAreaElement>(null);
+  const exModalDirectImageInputRef = useRef<HTMLInputElement>(null);
 
   // Edit Booklet Details State
   const [editingBookletDoc, setEditingBookletDoc] = useState<Document | null>(null);
@@ -488,6 +569,11 @@ export const LessonSummariesDashboard: React.FC = () => {
   const [printHeaderHeight, setPrintHeaderHeight] = useState<number>(25);
   const [questionBgColor, setQuestionBgColor] = useState<string>('#f0f9ff');
   const [solutionBgColor, setSolutionBgColor] = useState<string>('#f0fdf4');
+
+  // Supplements Optional Print States (Defaulted to false: NOT printed within unit explanation unless explicitly enabled)
+  const [printIncludeComprehensiveReview, setPrintIncludeComprehensiveReview] = useState<boolean>(false);
+  const [printIncludeUnitQuiz, setPrintIncludeUnitQuiz] = useState<boolean>(false);
+  const [printIncludeMindMap, setPrintIncludeMindMap] = useState<boolean>(false);
 
   // State for importing a structured lesson section JSON
   const [importSectionModalData, setImportSectionModalData] = useState<{
@@ -1109,8 +1195,32 @@ export const LessonSummariesDashboard: React.FC = () => {
       if (sourceDoc.type === 'pdf') {
         const content = await db.pdfContents.where({ docId: selectedSourceDocId }).first();
         sourceText = content?.textContent || '';
-      } else {
-        sourceText = secs.map(s => `${s.title}: ${s.content}`).join('\n\n');
+      }
+      
+      // If structured sections exist, compile complete reference text including theories, additions, and all practice exercises
+      if (secs && secs.length > 0) {
+        const structuredText = secs.map(s => {
+          let block = `=== ${s.title} ===\n${s.content || ''}`;
+          if (s.conceptLabel) block += `\n[مفهوم: ${s.conceptLabel}]`;
+          if (s.analysis?.additions && s.analysis.additions.length > 0) {
+            block += '\n' + s.analysis.additions.map(a => `[${a.label}]: ${a.content}`).join('\n');
+          }
+          if (s.practicalExercises && s.practicalExercises.length > 0) {
+            block += '\n--- تمرينات وتطبيقات عملية ---\n' + s.practicalExercises.map((pe, idx) => 
+              `تطبيق #${idx + 1}: ${pe.title || ''}\nنص التطبيق: ${pe.questionText || ''}\nاستراتيجية الحل: ${pe.strategyText || ''}\nالحل النموذجي: ${pe.solutionText || ''}`
+            ).join('\n\n');
+          }
+          if (s.practiceExercises && s.practiceExercises.length > 0) {
+            block += '\n--- فقرة تدرّب (تمارين الكتاب المدرسي) ---\n' + s.practiceExercises.map((pe, idx) => 
+              `تمرين تدرّب #${idx + 1}: ${pe.title || ''}\nنص التمرين: ${pe.questionText || ''}\nفكرة واستراتيجية الحل: ${pe.strategyText || ''}\nالحل التفصيلي: ${pe.solutionText || ''}`
+            ).join('\n\n');
+          }
+          return block;
+        }).join('\n\n\n');
+
+        if (!sourceText || sourceText.trim().length < structuredText.trim().length) {
+          sourceText = structuredText;
+        }
       }
       
       if (!sourceText || sourceText.trim().length < 50) {
@@ -1932,10 +2042,76 @@ export const LessonSummariesDashboard: React.FC = () => {
 
   const insertSymbolToSubBlock = (symbol: string) => {
     if (!editingSubBlockModal) return;
-    setEditingSubBlockModal(prev => prev ? {
-      ...prev,
-      fieldValue: (prev.fieldValue || '') + symbol
-    } : null);
+    const isSecondary = activeSubBlockEditorField === 'secondary' && !!editingSubBlockModal.secondaryFieldKey;
+    const targetRef = isSecondary ? subBlockSecondaryTextareaRef : subBlockPrimaryTextareaRef;
+    const el = targetRef.current;
+
+    if (el) {
+      const start = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? el.value.length;
+      const currentVal = isSecondary 
+        ? (editingSubBlockModal.secondaryFieldValue || '') 
+        : (editingSubBlockModal.fieldValue || '');
+      
+      const newVal = currentVal.substring(0, start) + symbol + currentVal.substring(end);
+      
+      if (isSecondary) {
+        setEditingSubBlockModal(prev => prev ? { ...prev, secondaryFieldValue: newVal } : null);
+      } else {
+        setEditingSubBlockModal(prev => prev ? { ...prev, fieldValue: newVal } : null);
+      }
+
+      setTimeout(() => {
+        if (targetRef.current) {
+          targetRef.current.focus();
+          const nextPos = start + symbol.length;
+          targetRef.current.setSelectionRange(nextPos, nextPos);
+        }
+      }, 0);
+    } else {
+      if (isSecondary) {
+        setEditingSubBlockModal(prev => prev ? { ...prev, secondaryFieldValue: (prev.secondaryFieldValue || '') + symbol } : null);
+      } else {
+        setEditingSubBlockModal(prev => prev ? { ...prev, fieldValue: (prev.fieldValue || '') + symbol } : null);
+      }
+    }
+  };
+
+  const wrapOrInsertTagInSubBlock = (prefix: string, suffix: string, defaultPlaceholder: string) => {
+    if (!editingSubBlockModal) return;
+    const isSecondary = activeSubBlockEditorField === 'secondary' && !!editingSubBlockModal.secondaryFieldKey;
+    const targetRef = isSecondary ? subBlockSecondaryTextareaRef : subBlockPrimaryTextareaRef;
+    const el = targetRef.current;
+
+    if (el) {
+      const start = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? el.value.length;
+      const currentVal = isSecondary 
+        ? (editingSubBlockModal.secondaryFieldValue || '') 
+        : (editingSubBlockModal.fieldValue || '');
+      
+      const selected = currentVal.substring(start, end);
+      const textToWrap = selected || defaultPlaceholder;
+      const inserted = prefix + textToWrap + suffix;
+      const newVal = currentVal.substring(0, start) + inserted + currentVal.substring(end);
+
+      if (isSecondary) {
+        setEditingSubBlockModal(prev => prev ? { ...prev, secondaryFieldValue: newVal } : null);
+      } else {
+        setEditingSubBlockModal(prev => prev ? { ...prev, fieldValue: newVal } : null);
+      }
+
+      setTimeout(() => {
+        if (targetRef.current) {
+          targetRef.current.focus();
+          const cursorStart = start + prefix.length;
+          const cursorEnd = cursorStart + textToWrap.length;
+          targetRef.current.setSelectionRange(cursorStart, cursorEnd);
+        }
+      }, 0);
+    } else {
+      insertSymbolToSubBlock(prefix + defaultPlaceholder + suffix);
+    }
   };
 
   const handleSubBlockAiRephrase = async () => {
@@ -1969,8 +2145,9 @@ export const LessonSummariesDashboard: React.FC = () => {
     }
   };
 
-  const handleSaveSubBlockEdit = async () => {
+  const handleSaveSubBlockEdit = async (closeOnSave: boolean = true) => {
     if (!editingSubBlockModal) return;
+    setIsSavingSubBlock(true);
     try {
       const updates: any = {
         [editingSubBlockModal.fieldKey]: editingSubBlockModal.fieldValue
@@ -1982,11 +2159,21 @@ export const LessonSummariesDashboard: React.FC = () => {
         updates.title = editingSubBlockModal.sectionTitle.trim();
       }
       await saveSectionFieldUpdate(editingSubBlockModal.sectionId, updates);
-      setEditingSubBlockModal(null);
-      showAlert('تم الحفظ بنجاح', 'تمت إضافة واعتماد التعديل اليدوي للفقرة بنجاح.');
+      
+      if (closeOnSave) {
+        setEditingSubBlockModal(null);
+        showAlert('تم الحفظ بنجاح', 'تمت إضافة واعتماد التعديل اليدوي للفقرة بنجاح.');
+      } else {
+        setSubBlockSaveNotice('تم حفظ التعديلات بنجاح ✓');
+        setTimeout(() => {
+          setSubBlockSaveNotice(null);
+        }, 3500);
+      }
     } catch (err) {
       console.error("Error saving sub-block edit:", err);
       showAlert('خطأ في الحفظ', 'تعذر حفظ التعديل في قاعدة البيانات.');
+    } finally {
+      setIsSavingSubBlock(false);
     }
   };
 
@@ -2398,7 +2585,7 @@ export const LessonSummariesDashboard: React.FC = () => {
           id: `ex_${Date.now()}_1`,
           title: 'تمرين تدرّب #1',
           questionText: 'نص التمرين كما هو في المرجع تماماً (الكتاب المدرسي)...',
-          strategyText: 'فكرة واستراتيجية الحل السريعة...',
+          strategyText: 'الفكرة العامة للتمرين وطريقة الحل بشكل موجز ومكثف...',
           solutionText: '① الخطوة الأولى: ...\n② الخطوة الثانية: ...',
           svgCode: ''
         }
@@ -2417,6 +2604,225 @@ export const LessonSummariesDashboard: React.FC = () => {
     const newSec = updatedSecs.find(s => s.id === newId);
     if (newSec) {
       startEditingSection(newSec);
+    }
+  };
+
+  // 8.c Import Single Theoretical or Practice Lesson from PDF (توليد وإضافة درس من ملف PDF)
+  const handleImportLessonFromPdf = async (type: 'theory' | 'practice') => {
+    if (!activeSummaryId) return;
+    if (!pdfLessonFile) {
+      showAlert('تنبيه', 'يرجى اختيار ملف PDF أولاً.');
+      return;
+    }
+
+    setIsProcessingPdfLesson(true);
+    setPdfLessonProgress('جاري استخراج وقراءة نصوص ملف الـ PDF... 📄🔍');
+
+    try {
+      const { text: fastText } = await extractPdfText(pdfLessonFile);
+      let finalText = fastText;
+      if (!fastText || fastText.trim().length < 150) {
+        setPdfLessonProgress('جاري معالجة صفحات الـ PDF وصقلها بالذكاء الاصطناعي (OCR)... 📸🤖');
+        const images = await convertPdfToImages(pdfLessonFile);
+        finalText = await extractTextFromImages(images);
+      }
+
+      if (!finalText || finalText.trim().length < 40) {
+        throw new Error('فشل استخراج نصوص كافية من ملف الـ PDF. يرجى التأكد من وضوح ومحتوى الملف.');
+      }
+
+      const maxOrder = summarySections.length > 0 
+        ? Math.max(...summarySections.map(s => s.order)) 
+        : -1;
+      const nextIdx = summarySections.length + 1;
+      const lessonOrdinal = `الدرس ${getArabicOrdinal(nextIdx)}`;
+
+      if (type === 'theory') {
+        setPdfLessonProgress('جاري صياغة الدرس النظري والمفاهيم والأمثلة والمطبات بالذكاء الاصطناعي... 🧠📘');
+        const res = await generateSingleTheoreticalLessonFromPdf(finalText, {
+          title: pdfLessonFile.name.replace(/\.pdf$/i, ''),
+          grade: activeSummary?.grade,
+          subject: activeSummary?.subject,
+          unit: activeSummary?.unit
+        });
+
+        const newId = await db.lessonSections.add({
+          docId: activeSummaryId,
+          title: res.title || `${lessonOrdinal}: مفهوم نظري`,
+          content: res.content || 'شرح الدرس النظري...',
+          svgCode: res.svgCode || '',
+          order: maxOrder + 1,
+          conceptLabel: 'شرح المفاهيم النظرية والعلمية والتبسيط الموجه:',
+          analysis: {
+            additions: [
+              { label: 'ملاحظات ونتائج هامة', content: res.notes || '' },
+              { label: 'مطبات امتحانية', content: res.traps || '' },
+              { label: 'دليل امتحاني', content: res.examGuidance || '' },
+              { label: 'تمرينات تطبيقية', content: res.exampleText || '' },
+              { label: 'الحل النموذجي', content: res.solutionText || '' },
+              { label: 'أمثلة محلولة إضافية', content: res.extraExampleText || '' },
+              { label: 'حل المثال الإضافي', content: res.extraSolutionText || '' }
+            ]
+          }
+        });
+
+        const updatedSecs = await db.lessonSections.where({ docId: activeSummaryId }).sortBy('order');
+        setSummarySections(updatedSecs);
+        setAddLessonModal(null);
+        setPdfLessonFile(null);
+        showAlert('تمت الإضافة بنجاح 🎉', `تم استخراج الدرس النظري "${res.title || lessonOrdinal}" من الـ PDF وإضافته بنجاح.`);
+
+        const newSec = updatedSecs.find(s => s.id === newId);
+        if (newSec) startEditingSection(newSec);
+
+      } else {
+        setPdfLessonProgress('جاري استخراج مسائل وتمارين التدرّب وصياغة الحلول النموذجية... ✍️🔍');
+        const res = await generateSinglePracticeLessonFromPdf(finalText, {
+          title: pdfLessonFile.name.replace(/\.pdf$/i, ''),
+          grade: activeSummary?.grade,
+          subject: activeSummary?.subject,
+          unit: activeSummary?.unit
+        });
+
+        const practiceList = Array.isArray(res.practiceExercises) && res.practiceExercises.length > 0
+          ? res.practiceExercises.map((ex: any, eIdx: number) => ({
+              id: `ex_${Date.now()}_${eIdx}`,
+              title: ex.title || `تمرين تدرّب #${eIdx + 1}`,
+              questionText: ex.questionText || '',
+              strategyText: ex.strategyText || '',
+              solutionText: ex.solutionText || '',
+              svgCode: ex.svgCode || ''
+            }))
+          : [
+              {
+                id: `ex_${Date.now()}_1`,
+                title: 'تمرين تدرّب #1',
+                questionText: 'نص التمرين المستخرج من الـ PDF...',
+                strategyText: 'استراتيجية الحل...',
+                solutionText: 'خطوات الحل النموذجي...',
+                svgCode: ''
+              }
+            ];
+
+        const newId = await db.lessonSections.add({
+          docId: activeSummaryId,
+          title: res.title || `${lessonOrdinal}: تدرّب - تطبيقات وتمارين الكتاب`,
+          content: '',
+          svgCode: '',
+          order: maxOrder + 1,
+          isPracticeOnly: true,
+          conceptLabel: '',
+          practiceSectionLabel: '',
+          practicalSectionLabel: '',
+          practiceExercises: practiceList,
+          practicalExercises: [],
+          analysis: { additions: [] }
+        });
+
+        const updatedSecs = await db.lessonSections.where({ docId: activeSummaryId }).sortBy('order');
+        setSummarySections(updatedSecs);
+        setAddLessonModal(null);
+        setPdfLessonFile(null);
+        showAlert('تمت الإضافة بنجاح 🎉', `تم استخراج درس التدرّب مع ${practiceList.length} تمرين من الـ PDF وإضافته بنجاح.`);
+      }
+    } catch (err: any) {
+      console.error('Failed to import lesson from PDF:', err);
+      showAlert('خطأ أثناء الاستخراج', err.message || 'حدث خطأ أثناء معالجة ملف الـ PDF بالذكاء الاصطناعي.');
+    } finally {
+      setIsProcessingPdfLesson(false);
+      setPdfLessonProgress('');
+    }
+  };
+
+  // 8.d Handle Extracting Exercise from Image (استخراج وحل تمرين من صورة)
+  const handleProcessExerciseFromImageFile = async (file: File, sectionId: number) => {
+    setIsExtractingExerciseImage(true);
+    setExerciseImageExtractingProgress('جاري قراءة الصورة واستخراج نص المسألة والرموز الرياضية والحل بالذكاء الاصطناعي... 📸🤖');
+
+    try {
+      const base64Data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const res = await extractPracticeExerciseFromImage(
+        base64Data,
+        file.type,
+        { grade: activeSummary?.grade, subject: activeSummary?.subject }
+      );
+
+      const sec = summarySections.find(s => s.id === sectionId);
+      const nextIndex = (sec?.practiceExercises?.length || 0) + 1;
+
+      const newEx: PracticeExercise = {
+        id: `ex_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+        title: res.title || `تمرين تدرّب #${nextIndex}`,
+        questionText: res.questionText || '',
+        strategyText: res.strategyText || '',
+        solutionText: res.solutionText || '',
+        svgCode: res.svgCode || ''
+      };
+
+      setAddExerciseChoiceModal(null);
+      setEditingExModal({
+        sectionId,
+        isPractical: false,
+        exercise: newEx
+      });
+      showAlert('تم الاستخراج بنجاح 📸✨', 'تم استخراج نص التمرين وفكرة الحل والخطوات النموذجية بنجاح! يمكنك الآن مراجعتها أو تعديلها وحفظها.');
+    } catch (err: any) {
+      console.error('Failed to extract exercise from image:', err);
+      showAlert('خطأ في استخراج التمرين', err.message || 'تعذر استخراج بيانات التمرين من الصورة.');
+    } finally {
+      setIsExtractingExerciseImage(false);
+      setExerciseImageExtractingProgress('');
+    }
+  };
+
+  // Helper for inserting math, numbering, or icons into Exercise Editor
+  const insertSymbolToExercise = (symbol: string) => {
+    if (!editingExModal) return;
+    const targetRef = activeExModalField === 'question' 
+      ? exQuestionRef 
+      : activeExModalField === 'strategy' 
+      ? exStrategyRef 
+      : activeExModalField === 'solution' 
+      ? exSolutionRef 
+      : exSvgRef;
+    
+    const fieldKey = activeExModalField === 'question' 
+      ? 'questionText' 
+      : activeExModalField === 'strategy' 
+      ? 'strategyText' 
+      : activeExModalField === 'solution' 
+      ? 'solutionText' 
+      : 'svgCode';
+
+    const el = targetRef.current;
+    if (el) {
+      const start = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? el.value.length;
+      const currentVal = (editingExModal.exercise as any)[fieldKey] || '';
+      const newVal = currentVal.substring(0, start) + symbol + currentVal.substring(end);
+      setEditingExModal({
+        ...editingExModal,
+        exercise: { ...editingExModal.exercise, [fieldKey]: newVal }
+      });
+      setTimeout(() => {
+        if (targetRef.current) {
+          targetRef.current.focus();
+          const nextPos = start + symbol.length;
+          targetRef.current.setSelectionRange(nextPos, nextPos);
+        }
+      }, 0);
+    } else {
+      const currentVal = (editingExModal.exercise as any)[fieldKey] || '';
+      setEditingExModal({
+        ...editingExModal,
+        exercise: { ...editingExModal.exercise, [fieldKey]: currentVal + symbol }
+      });
     }
   };
 
@@ -2794,6 +3200,7 @@ export const LessonSummariesDashboard: React.FC = () => {
               <div>
                 <div className="flex items-center gap-2 flex-wrap">
                   <h4 className="text-sm font-black text-slate-900">اعتماد ونشر الوحدة سحابياً للطلاب (Supabase)</h4>
+                  <LocalDatabaseIdBadge id={activeSummary.id} tableLabel="documents" compact={false} />
                   <UnitSyncIndicator docId={activeSummary.id!} compact={false} />
                 </div>
                 <p className="text-xs text-slate-500 font-medium mt-0.5">
@@ -2825,10 +3232,11 @@ export const LessonSummariesDashboard: React.FC = () => {
             <div className="flex flex-wrap gap-2 w-full sm:w-auto">
               <button 
                 onClick={handlePrint}
-                className="flex items-center gap-2 px-4 py-2.5 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-sm font-extrabold shadow-md transition-all h-11"
+                className="flex items-center gap-2 px-4 py-2.5 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-sm font-extrabold shadow-md transition-all h-11 cursor-pointer"
+                title="معاينة الطباعة وحفظ كـ PDF"
               >
                 <Printer size={16} />
-                تحميل كـ PDF / طباعة 🖨️
+                معاينة الطباعة / حفظ كـ PDF 🖨️
               </button>
               <button 
                 onClick={downloadAsJson}
@@ -2847,17 +3255,17 @@ export const LessonSummariesDashboard: React.FC = () => {
                 تعديل المسميات/الصف 📝
               </button>
               <button 
-                onClick={handleAddNewManualSection}
-                className="flex items-center gap-2 px-4 py-2 bg-emerald-50 text-emerald-750 border border-emerald-200 rounded-xl text-sm font-black hover:bg-emerald-100 transition-all h-11 shadow-xs"
-                title="إضافة درس نظري جديد يتضمن المفاهيم والقواعد والملاحظات والمطبات والأمثلة"
+                onClick={() => setAddLessonModal({ isOpen: true, type: 'theory' })}
+                className="flex items-center gap-2 px-4 py-2 bg-emerald-50 text-emerald-750 border border-emerald-200 rounded-xl text-sm font-black hover:bg-emerald-100 transition-all h-11 shadow-xs cursor-pointer"
+                title="إضافة درس نظري جديد يدوياً أو من ملف PDF"
               >
                 <Plus size={16} />
                 إضافة درس نظري 📘➕
               </button>
               <button 
-                onClick={handleAddNewPracticeOnlySection}
-                className="flex items-center gap-2 px-4 py-2 bg-amber-50 text-amber-850 border border-amber-200 rounded-xl text-sm font-black hover:bg-amber-100 transition-all h-11 shadow-xs"
-                title="إضافة درس تدرّب مستقل يحتوي على نص مسائل الكتاب واستراتيجية الحل والحل المفصل"
+                onClick={() => setAddLessonModal({ isOpen: true, type: 'practice' })}
+                className="flex items-center gap-2 px-4 py-2 bg-amber-50 text-amber-850 border border-amber-200 rounded-xl text-sm font-black hover:bg-amber-100 transition-all h-11 shadow-xs cursor-pointer"
+                title="إضافة درس تدرّب مستقل يدوياً أو من ملف PDF"
               >
                 <Plus size={16} />
                 إضافة درس تدرّب ✍️➕
@@ -3263,6 +3671,66 @@ export const LessonSummariesDashboard: React.FC = () => {
                 </div>
               </div>
             </div>
+
+            {/* Supplements Optional Printing Controls (مراجعة الوحدة - اختبار الوحدة الشامل - الخريطة الذهنية) */}
+            <div className="border-t border-gray-200 pt-4 mt-3 space-y-2.5 bg-violet-50/40 p-4 rounded-xl border border-violet-150/70">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2 text-violet-950 font-black text-xs sm:text-sm">
+                  <span>🗂️</span>
+                  <span>طباعة الملحقات التكميلية (اختياري لكل ملحق على حدى - غير مشمولة في شرح الوحدة تلقائياً):</span>
+                </div>
+                <span className="text-[11px] text-violet-700 bg-violet-100 font-bold px-2.5 py-0.5 rounded-full">
+                  يمكن أيضاً طباعة كل ملحق منفرداً من قسمه المخصص
+                </span>
+              </div>
+              <p className="text-[11px] text-gray-500 font-medium">
+                تُطبع كراسة شرح الدروس خالية من هذه الملحقات لتوفير المساحة والحبر. فعّل أياً منها أدناه إذا أردت إدراجه في نهاية الكراس، أو اطبع كل ملحق مستقلاً من داخل قسمه.
+              </p>
+              
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-1">
+                {/* 1. Comprehensive Review Supplement */}
+                <label className="flex items-center gap-2.5 p-2.5 bg-white rounded-xl border border-violet-200/80 hover:border-violet-400 cursor-pointer transition-all shadow-2xs">
+                  <input
+                    type="checkbox"
+                    checked={printIncludeComprehensiveReview}
+                    onChange={(e) => setPrintIncludeComprehensiveReview(e.target.checked)}
+                    className="w-4 h-4 text-violet-600 rounded border-gray-300 focus:ring-violet-500 cursor-pointer"
+                  />
+                  <div className="flex flex-col">
+                    <span className="text-xs font-black text-violet-950">مراجعة الوحدة الشاملة 📖</span>
+                    <span className="text-[10px] text-gray-500 font-medium">التعاريف، المبرهنات، النتائج، المطبات</span>
+                  </div>
+                </label>
+
+                {/* 2. Unit Quiz Supplement */}
+                <label className="flex items-center gap-2.5 p-2.5 bg-white rounded-xl border border-indigo-200/80 hover:border-indigo-400 cursor-pointer transition-all shadow-2xs">
+                  <input
+                    type="checkbox"
+                    checked={printIncludeUnitQuiz}
+                    onChange={(e) => setPrintIncludeUnitQuiz(e.target.checked)}
+                    className="w-4 h-4 text-indigo-600 rounded border-gray-300 focus:ring-indigo-500 cursor-pointer"
+                  />
+                  <div className="flex flex-col">
+                    <span className="text-xs font-black text-indigo-950">اختبار الوحدة الشامل 🎯</span>
+                    <span className="text-[10px] text-gray-500 font-medium">الأسئلة المؤتمتة وسلم التصحيح</span>
+                  </div>
+                </label>
+
+                {/* 3. Mind Map Supplement */}
+                <label className="flex items-center gap-2.5 p-2.5 bg-white rounded-xl border border-amber-200/80 hover:border-amber-400 cursor-pointer transition-all shadow-2xs">
+                  <input
+                    type="checkbox"
+                    checked={printIncludeMindMap}
+                    onChange={(e) => setPrintIncludeMindMap(e.target.checked)}
+                    className="w-4 h-4 text-amber-600 rounded border-gray-300 focus:ring-amber-500 cursor-pointer"
+                  />
+                  <div className="flex flex-col">
+                    <span className="text-xs font-black text-amber-950">الخريطة الذهنية البصرية 🧭</span>
+                    <span className="text-[10px] text-gray-500 font-medium">المخطط الشبكي وشجرة المفاهيم</span>
+                  </div>
+                </label>
+              </div>
+            </div>
           </div>
 
           {/* Book Print Content Area */}
@@ -3455,6 +3923,7 @@ export const LessonSummariesDashboard: React.FC = () => {
                           <span>{isPractice ? '✍️' : '📘'}</span>
                           <span className="truncate">{mainTitle}</span>
                         </span>
+                        <LocalDatabaseIdBadge id={sec.id} tableLabel="lessonSections" compact={true} />
                       </button>
                     );
                   })}
@@ -3498,6 +3967,7 @@ export const LessonSummariesDashboard: React.FC = () => {
                       )}
                       {/* Section Administrative Actions Menu (Hidden in Print) */}
                       <div className="absolute left-4 top-4 flex items-center gap-1.5 no-print bg-white/95 backdrop-blur-md p-2 rounded-xl shadow-md border border-gray-150 z-[100] transition-all">
+                        <LocalDatabaseIdBadge id={sec.id} tableLabel="lessonSections" compact={true} />
                         <SyncStatusBadge
                           table="lessonSections"
                           id={sec.id!}
@@ -4959,6 +5429,9 @@ export const LessonSummariesDashboard: React.FC = () => {
                                       <span>{isPractice ? '✍️' : '📘'}</span>
                                       <span>{lessonNumberLabel}</span>
                                     </span>
+                                    <div className="no-print">
+                                      <LocalDatabaseIdBadge id={sec.id} tableLabel="lessonSections" compact={false} />
+                                    </div>
 
                                     {editingTitleSecId === sec.id ? (
                                       <div className="flex items-center gap-2 flex-1 max-w-xl no-print">
@@ -5749,30 +6222,27 @@ export const LessonSummariesDashboard: React.FC = () => {
                                 ) : (
                                   <div />
                                 )}
-                                <button
-                                  onClick={() => {
-                                    const nextIndex = (sec.practiceExercises?.length || 0) + 1;
-                                    const newExId = `ex_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-                                    const newEx: PracticeExercise = {
-                                      id: newExId,
-                                      title: `تمرين تدرّب #${nextIndex}`,
-                                      questionText: '',
-                                      strategyText: '',
-                                      solutionText: '',
-                                      svgCode: ''
-                                    };
-                                    setEditingExModal({
-                                      sectionId: sec.id!,
-                                      isPractical: false,
-                                      exercise: newEx
-                                    });
-                                  }}
-                                  className="no-print inline-flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-black rounded-lg shadow-sm transition-all active:scale-95 cursor-pointer"
-                                  title="إضافة تمرين جديد لهذه الفقرة"
-                                >
-                                  <Plus size={14} />
-                                  إضافة تمرين جديد
-                                </button>
+                                <div className="flex items-center gap-2 no-print flex-wrap">
+                                  <button
+                                    onClick={() => setAddExerciseChoiceModal({ isOpen: true, sectionId: sec.id! })}
+                                    className="no-print inline-flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-black rounded-lg shadow-sm transition-all active:scale-95 cursor-pointer"
+                                    title="إضافة تمرين جديد لهذه الفقرة (يدوياً أو من صورة)"
+                                  >
+                                    <Plus size={14} />
+                                    إضافة تمرين جديد
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setTargetExerciseSectionId(sec.id!);
+                                      exerciseImageFileInputRef.current?.click();
+                                    }}
+                                    className="no-print inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 text-xs font-black rounded-lg shadow-2xs transition-all active:scale-95 cursor-pointer"
+                                    title="استخراج وحل تمرين من صورة مباشرة"
+                                  >
+                                    <Camera size={13} />
+                                    إضافة من صورة 📸
+                                  </button>
+                                </div>
                               </div>
 
                               <div className="space-y-4">
@@ -5891,29 +6361,26 @@ export const LessonSummariesDashboard: React.FC = () => {
 
                                 {/* Add Another Exercise Button at the bottom of the list */}
                                 <div className="no-print pt-2">
-                                  <button
-                                    onClick={() => {
-                                      const nextIndex = (sec.practiceExercises?.length || 0) + 1;
-                                      const newExId = `ex_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-                                      const newEx: PracticeExercise = {
-                                        id: newExId,
-                                        title: `تمرين تدرّب #${nextIndex}`,
-                                        questionText: '',
-                                        strategyText: '',
-                                        solutionText: '',
-                                        svgCode: ''
-                                      };
-                                      setEditingExModal({
-                                        sectionId: sec.id!,
-                                        isPractical: false,
-                                        exercise: newEx
-                                      });
-                                    }}
-                                    className="w-full py-3 bg-violet-50/60 hover:bg-violet-100/80 border-2 border-dashed border-violet-200 text-violet-800 hover:text-violet-950 font-bold text-xs rounded-xl flex items-center justify-center gap-2 transition-all active:scale-[0.99] cursor-pointer"
-                                  >
-                                    <Plus size={16} />
-                                    إضافة تمرين جديد إلى هذه الفقرة ✍️
-                                  </button>
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      onClick={() => setAddExerciseChoiceModal({ isOpen: true, sectionId: sec.id! })}
+                                      className="flex-1 py-3 bg-violet-50/70 hover:bg-violet-100 border-2 border-dashed border-violet-300 text-violet-900 font-bold text-xs rounded-xl flex items-center justify-center gap-2 transition-all active:scale-[0.99] cursor-pointer"
+                                    >
+                                      <Plus size={16} />
+                                      إضافة تمرين جديد إلى هذه الفقرة ✍️
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        setTargetExerciseSectionId(sec.id!);
+                                        exerciseImageFileInputRef.current?.click();
+                                      }}
+                                      className="px-4 py-3 bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-900 font-black text-xs rounded-xl flex items-center justify-center gap-2 transition-all active:scale-[0.99] cursor-pointer shadow-2xs"
+                                      title="إضافة واستخراج تمرين من صورة"
+                                    >
+                                      <Camera size={16} />
+                                      إضافة من صورة 📸
+                                    </button>
+                                  </div>
                                 </div>
                               </div>
                             </div>
@@ -5929,28 +6396,23 @@ export const LessonSummariesDashboard: React.FC = () => {
                               <p className="text-xs text-gray-500 font-medium max-w-md mx-auto leading-relaxed">
                                 اضغط على الزر أدناه لإضافة تمرين جديد وكتابة نص المسألة، استراتيجية وفكرة الحل، خطوات الحل النموذجي، وكود الرسم إن وجد.
                               </p>
-                              <div className="pt-2">
+                              <div className="pt-2 flex items-center justify-center gap-3 flex-wrap">
                                 <button
-                                  onClick={() => {
-                                    const newExId = `ex_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-                                    const newEx: PracticeExercise = {
-                                      id: newExId,
-                                      title: `تمرين تدرّب #1`,
-                                      questionText: '',
-                                      strategyText: '',
-                                      solutionText: '',
-                                      svgCode: ''
-                                    };
-                                    setEditingExModal({
-                                      sectionId: sec.id!,
-                                      isPractical: false,
-                                      exercise: newEx
-                                    });
-                                  }}
+                                  onClick={() => setAddExerciseChoiceModal({ isOpen: true, sectionId: sec.id! })}
                                   className="inline-flex items-center gap-2 px-6 py-2.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-black rounded-xl shadow-md transition-all active:scale-95 cursor-pointer"
                                 >
                                   <Plus size={16} />
                                   إضافة تمرين جديد وكتابة السؤال والحل
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setTargetExerciseSectionId(sec.id!);
+                                    exerciseImageFileInputRef.current?.click();
+                                  }}
+                                  className="inline-flex items-center gap-2 px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white text-xs font-black rounded-xl shadow-md transition-all active:scale-95 cursor-pointer"
+                                >
+                                  <Camera size={16} />
+                                  استخراج وإضافة تمرين من صورة 📸
                                 </button>
                               </div>
                             </div>
@@ -5966,7 +6428,7 @@ export const LessonSummariesDashboard: React.FC = () => {
 
             {/* Unit Comprehensive Review Section (مراجعة شاملة للوحدة) */}
             {activeSummary && (
-              <div className="mt-12 page-break-before">
+              <div className={`mt-12 page-break-before ${!printIncludeComprehensiveReview ? 'no-print' : ''}`}>
                 <UnitComprehensiveReviewSection
                   document={activeSummary}
                   sections={summarySections}
@@ -5980,7 +6442,7 @@ export const LessonSummariesDashboard: React.FC = () => {
 
             {/* Unit Quiz Section */}
             {activeSummary && (
-              <div className="mt-12 no-print page-break-before">
+              <div className={`mt-12 page-break-before ${!printIncludeUnitQuiz ? 'no-print' : ''}`}>
                 <UnitQuizSection
                   document={activeSummary}
                   sections={summarySections}
@@ -5994,7 +6456,7 @@ export const LessonSummariesDashboard: React.FC = () => {
 
             {/* Unit Mind Map Section */}
             {activeSummary && (
-              <div className="mt-12 no-print page-break-before">
+              <div className={`mt-12 page-break-before ${!printIncludeMindMap ? 'no-print' : ''}`}>
                 <UnitMindMapSection
                   document={activeSummary}
                   sections={summarySections}
@@ -6046,7 +6508,7 @@ export const LessonSummariesDashboard: React.FC = () => {
                   className="px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white font-black rounded-xl text-xs shadow-xs transition-all flex items-center gap-1.5 cursor-pointer"
                 >
                   <Sparkles size={14} className="text-yellow-300 animate-pulse" />
-                  <span>تأليف كراسة ذكية</span>
+                  <span>تأليف كراسة جديدة</span>
                 </button>
 
                 <button
@@ -6122,6 +6584,7 @@ export const LessonSummariesDashboard: React.FC = () => {
                           <span className="text-[10px] font-black px-2.5 py-0.5 rounded-lg border bg-purple-50 text-purple-700 border-purple-100">
                             نوطة تبسيط الدروس
                           </span>
+                          <LocalDatabaseIdBadge id={sum.id} tableLabel="documents" compact={true} />
                           <UnitSyncIndicator docId={sum.id!} compact={true} />
                         </div>
                         <div className="flex items-center gap-1">
@@ -6207,14 +6670,31 @@ export const LessonSummariesDashboard: React.FC = () => {
                       <span className="text-[10px] text-gray-400 font-medium">
                         {new Date(sum.updatedAt || sum.createdAt || Date.now()).toLocaleDateString('ar-EG')}
                       </span>
-                      <button
-                        type="button"
-                        onClick={() => setActiveSummaryId(sum.id!)}
-                        className="py-1.5 px-3 bg-violet-50 hover:bg-violet-600 text-violet-700 hover:text-white font-extrabold rounded-xl text-xs flex items-center gap-1 transition-all cursor-pointer border border-violet-200 hover:border-transparent"
-                      >
-                        <Sparkles size={13} />
-                        معاينة وتعديل النوطة
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setActiveSummaryId(sum.id!);
+                            setTimeout(() => {
+                              window.print();
+                            }, 300);
+                          }}
+                          className="py-1.5 px-2.5 bg-indigo-50 hover:bg-indigo-600 text-indigo-700 hover:text-white font-extrabold rounded-xl text-xs flex items-center gap-1 transition-all cursor-pointer border border-indigo-200 hover:border-transparent"
+                          title="معاينة الطباعة / حفظ كـ PDF"
+                        >
+                          <Printer size={13} />
+                          <span>معاينة الطباعة / PDF</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setActiveSummaryId(sum.id!)}
+                          className="py-1.5 px-3 bg-violet-50 hover:bg-violet-600 text-violet-700 hover:text-white font-extrabold rounded-xl text-xs flex items-center gap-1 transition-all cursor-pointer border border-violet-200 hover:border-transparent"
+                        >
+                          <Sparkles size={13} />
+                          معاينة وتعديل النوطة
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -6785,7 +7265,10 @@ export const LessonSummariesDashboard: React.FC = () => {
 
                 {/* Strategy Text */}
                 <div className="space-y-1">
-                  <label className="block text-xs font-bold text-gray-600">فكرة واستراتيجية الحل السريعة (تظهر في صندوق المساعدة):</label>
+                  <label className="block text-xs font-bold text-gray-700 flex items-center justify-between">
+                    <span>💡 فكرة واستراتيجية الحل:</span>
+                    <span className="text-[10px] font-normal text-amber-700">(الفكرة العامة للتمرين وطريقة الحل بشكل موجز ومكثف)</span>
+                  </label>
                   <textarea 
                     rows={3}
                     value={editingExModal.exercise.strategyText}
@@ -6794,7 +7277,7 @@ export const LessonSummariesDashboard: React.FC = () => {
                       exercise: { ...editingExModal.exercise, strategyText: e.target.value }
                     })}
                     className="w-full text-sm p-3 border border-slate-300 rounded-xl focus:border-violet-500 focus:ring-1 focus:ring-violet-500 outline-none transition-all font-medium leading-relaxed"
-                    placeholder="💡 فكرة الحل السريع..."
+                    placeholder="اكتب الفكرة العامة للتمرين وطريقة الحل بشكل موجز ومكثف (وليس شرحاً كاملاً لكافة الطلبات، لأن تفصيل خطوات الطلبات مكانه في خطوات الحل أدناه)..."
                   />
                 </div>
 
@@ -7336,9 +7819,11 @@ export const LessonSummariesDashboard: React.FC = () => {
                 <div className="flex-1 flex flex-col items-center justify-center p-12 text-center space-y-4">
                   <div className="w-12 h-12 border-4 border-emerald-200 border-t-emerald-600 rounded-full animate-spin"></div>
                   <div className="space-y-1">
-                    <h4 className="text-base font-black text-slate-800 font-sans">جاري التدقيق العلمي واللغوي والتنسيق الاحترافي للفقرة...</h4>
+                    <h4 className="text-base font-black text-slate-800 font-sans">
+                      جاري التدقيق العلمي والتحكيم المستقل للفقرة (correctionAgent)...
+                    </h4>
                     <p className="text-xs text-slate-500 max-w-md leading-relaxed">
-                      نقوم الآن بالتدقيق العلمي لفقرة الشرح، فحص التنسيق والإملاء العربي، تطبيق رموز LaTeX والترميز الملون وتأكيد المصطلحات المنهجية السورية.
+                      يتم الآن تشغيل طبقة التحكيم المستقلة بنموذج استدلال منفصل لفحص الخطوات الحسابية 100%، تدقيق كود LaTeX وقاعدة الدولار المفرد $...$، وتأكيد المصطلحات المنهجية السورية.
                     </p>
                   </div>
                 </div>
@@ -7352,12 +7837,17 @@ export const LessonSummariesDashboard: React.FC = () => {
                   <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl flex items-start gap-3.5">
                     <span className="text-2xl shrink-0">📋</span>
                     <div className="space-y-1 flex-1">
-                      <h4 className="text-xs font-black text-blue-900 font-sans flex items-center gap-1.5">
-                        تقرير التدقيق والملاحظات اللغوية والعلمية:
-                        <span className={`px-2 py-0.5 text-[9px] rounded-full font-black ${verifySecResult.isCorrect ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'}`}>
-                          {verifySecResult.isCorrect ? 'الفقرة سليمة بالأساس وتم تحسين تنسيقها' : 'تم العثور على ملاحظات وتصحيحها'}
+                      <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
+                        <h4 className="text-xs font-black text-blue-900 font-sans flex items-center gap-1.5">
+                          تقرير التدقيق والملاحظات اللغوية والعلمية:
+                          <span className={`px-2 py-0.5 text-[9px] rounded-full font-black ${verifySecResult.isCorrect ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'}`}>
+                            {verifySecResult.isCorrect ? 'الفقرة سليمة بالأساس وتم تحسين تنسيقها' : 'تم العثور على ملاحظات وتصحيحها'}
+                          </span>
+                        </h4>
+                        <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2.5 py-0.5 rounded-full font-black border border-emerald-200">
+                          ⚖️ طبقة التحكيم: correctionAgent (نموذج مستقل)
                         </span>
-                      </h4>
+                      </div>
                       <p className="text-xs text-blue-800 leading-relaxed whitespace-pre-line font-medium">
                         {verifySecResult.notes}
                       </p>
@@ -7684,38 +8174,223 @@ export const LessonSummariesDashboard: React.FC = () => {
                   </div>
                 </div>
               </div>
-              <button 
-                onClick={() => setEditingSubBlockModal(null)}
-                className="text-white/80 hover:text-white hover:bg-white/15 p-2 rounded-xl transition-all cursor-pointer"
-              >
-                <X size={20} />
-              </button>
+              <div className="flex items-center gap-2">
+                {/* Header Quick Save Button */}
+                <button
+                  type="button"
+                  onClick={() => handleSaveSubBlockEdit(false)}
+                  disabled={isSavingSubBlock}
+                  className="hidden sm:flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-500/90 hover:bg-emerald-500 text-white rounded-xl text-xs font-black shadow-xs transition-all cursor-pointer disabled:opacity-50"
+                  title="حفظ التعديلات في قاعدة البيانات دون الخروج من النافذة"
+                >
+                  {isSavingSubBlock ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+                  <span>{isSavingSubBlock ? 'جاري الحفظ...' : 'حفظ'}</span>
+                </button>
+                <button 
+                  onClick={() => setEditingSubBlockModal(null)}
+                  className="text-white/80 hover:text-white hover:bg-white/15 p-2 rounded-xl transition-all cursor-pointer"
+                  title="إغلاق النافذة"
+                >
+                  <X size={20} />
+                </button>
+              </div>
             </div>
 
-            {/* Symbols Toolbar & AI Rephrase Bar */}
-            <div className="bg-slate-50 border-b border-slate-200 p-3 shrink-0 flex flex-wrap items-center justify-between gap-2 no-print">
-              <div className="flex items-center gap-1 overflow-x-auto py-1 max-w-full">
-                <span className="text-[11px] font-black text-slate-600 shrink-0 ml-1">إدراج رموز رياضية:</span>
-                {['√', '∫', 'lim', 'α', 'β', 'π', 'θ', 'Δ', '≠', '≤', '≥', '±', 'x²', 'x/y', '∞'].map((sym, sIdx) => (
+            {/* Symbols Toolbar & Paragraph Icons & AI Rephrase Bar */}
+            <div className="bg-slate-50 border-b border-slate-200 p-3 shrink-0 flex flex-col gap-2.5 no-print">
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                
+                {/* Math & Paragraph Symbols Toolbar */}
+                <div className="flex flex-wrap items-center gap-2 overflow-x-auto py-0.5 max-w-full">
+                  {/* Math Symbols Group */}
+                  <div className="flex items-center gap-1 shrink-0">
+                    <span className="text-[11px] font-black text-slate-700 shrink-0 ml-1 flex items-center gap-1">
+                      <span className="text-violet-600 font-bold">∑</span>
+                      <span>إدراج رموز رياضية:</span>
+                    </span>
+                    {['√', '∫', 'lim', 'α', 'β', 'π', 'θ', 'Δ', '≠', '≤', '≥', '±', 'x²', 'x/y', '∞'].map((sym, sIdx) => (
+                      <button
+                        key={sIdx}
+                        type="button"
+                        onClick={() => insertSymbolToSubBlock(sym)}
+                        className="px-2 py-1 bg-white hover:bg-violet-50 hover:text-violet-700 text-slate-700 text-xs font-bold border border-slate-200 rounded-lg shadow-2xs transition-all cursor-pointer shrink-0 font-mono"
+                        title={`إدراج رمز ${sym}`}
+                      >
+                        {sym}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Visual Divider */}
+                  <div className="h-5 w-px bg-slate-300 mx-1 hidden sm:block shrink-0" />
+
+                  {/* Numbering & Steps Toolbar (1 - 2 - 3 ... إلخ) */}
+                  <div className="flex items-center gap-1 shrink-0 bg-indigo-50/70 px-2 py-1 rounded-xl border border-indigo-200/80">
+                    <span className="text-[11px] font-black text-indigo-900 shrink-0 ml-0.5 flex items-center gap-1">
+                      <span>🔢</span>
+                      <span>ترقيم وخطوات:</span>
+                    </span>
+                    <div className="flex items-center gap-1 overflow-x-auto">
+                      {NUMBERING_ICONS.map((numSym, nIdx) => (
+                        <button
+                          key={nIdx}
+                          type="button"
+                          onClick={() => insertSymbolToSubBlock(numSym + ' ')}
+                          title={`إدراج ترقيم ${numSym}`}
+                          className="h-7 px-1.5 min-w-[28px] flex items-center justify-center bg-white hover:bg-indigo-100 hover:border-indigo-300 border border-slate-200 rounded-lg shadow-2xs text-xs sm:text-sm font-bold transition-all cursor-pointer shrink-0 hover:scale-110 active:scale-95 font-sans"
+                        >
+                          {numSym}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Visual Divider */}
+                  <div className="h-5 w-px bg-slate-300 mx-1 hidden sm:block shrink-0" />
+
+                  {/* Paragraph Symbols & Icons Dropdown and Quick Access (Requested by User) */}
+                  <div className="flex items-center gap-1.5 shrink-0 bg-violet-50/70 px-2 py-1 rounded-xl border border-violet-200/80">
+                    <span className="text-[11px] font-black text-violet-900 shrink-0 ml-0.5 flex items-center gap-1">
+                      <span>🏷️</span>
+                      <span>رموز وأيقونات الفقرات:</span>
+                    </span>
+                    
+                    {/* Select Dropdown List */}
+                    <select
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          insertSymbolToSubBlock(e.target.value + ' ');
+                          e.target.value = '';
+                        }
+                      }}
+                      defaultValue=""
+                      className="text-xs bg-white text-slate-800 border border-violet-200 rounded-lg px-2 py-1 font-bold outline-none hover:border-violet-400 focus:ring-2 focus:ring-violet-400/30 cursor-pointer shadow-2xs shrink-0"
+                      title="اختر رمز أو أيقونة للفقرة لإدراجها مباشرة في موضع المؤشر"
+                    >
+                      <option value="" disabled>📋 قائمة أيقونات الفقرات...</option>
+                      {PARAGRAPH_ICONS_LIST.map((item, idx) => (
+                        <option key={idx} value={item.icon}>
+                          {item.icon} {item.name}
+                        </option>
+                      ))}
+                    </select>
+
+                    {/* Quick 1-Click Buttons */}
+                    <div className="flex items-center gap-1 overflow-x-auto">
+                      {QUICK_PARAGRAPH_ICONS.map((icon, iIdx) => (
+                        <button
+                          key={iIdx}
+                          type="button"
+                          onClick={() => insertSymbolToSubBlock(icon + ' ')}
+                          title={`إدراج أيقونة ${icon}`}
+                          className="w-7 h-7 flex items-center justify-center bg-white hover:bg-violet-100 hover:border-violet-300 border border-slate-200 rounded-lg shadow-2xs text-xs sm:text-sm transition-all cursor-pointer shrink-0 hover:scale-110 active:scale-95"
+                        >
+                          {icon}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Visual Divider */}
+                  <div className="h-5 w-px bg-slate-300 mx-1 hidden sm:block shrink-0" />
+
+                  {/* Formatting & Headings Tags (الوسم **عبارة** والوسوم الأحمر والأزرق) */}
+                  <div className="flex items-center gap-1.5 shrink-0 bg-slate-100/90 px-2 py-1 rounded-xl border border-slate-300/80">
+                    <span className="text-[11px] font-black text-slate-800 shrink-0 ml-0.5 flex items-center gap-1">
+                      <span>🎨</span>
+                      <span>وسوم التنسيق:</span>
+                    </span>
+
+                    {/* Button 1: Soft Violet Highlight **عبارة** */}
+                    <button
+                      type="button"
+                      onClick={() => wrapOrInsertTagInSubBlock('**', '**', 'عبارة هامة')}
+                      className="h-7 px-2 flex items-center gap-1 bg-[#ede9fe] hover:bg-[#ddd6fe] text-[#4c1d95] border border-violet-300/80 rounded-lg shadow-2xs text-xs font-black transition-all cursor-pointer shrink-0 hover:scale-105 active:scale-95"
+                      title="الوسم **عبارة**: تظليل كلمات وعبارات هامة ومفتاحية بلون بنفسجي ناعم فوسفوري (كما يظلل الطالب أثناء الدراسة - ولا يجب أن تستخدم لعناوين الفقرات)"
+                    >
+                      <span className="text-xs">🖍️</span>
+                      <span>**تظليل عبارة**</span>
+                    </button>
+
+                    {/* Button 2: Red Main Title <main-title> */}
+                    <button
+                      type="button"
+                      onClick={() => wrapOrInsertTagInSubBlock('<main-title>', '</main-title>', 'العنوان الرئيسي')}
+                      className="h-7 px-2 flex items-center gap-1.5 bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 rounded-lg shadow-2xs text-xs font-black transition-all cursor-pointer shrink-0 hover:scale-105 active:scale-95"
+                      title="وسم أحمر للعناوين الرئيسية الكبرى: <main-title>العنوان الرئيسي</main-title>"
+                    >
+                      <span className="w-2.5 h-2.5 rounded-full bg-red-600 shrink-0 shadow-2xs"></span>
+                      <span>عنوان رئيسي (أحمر)</span>
+                    </button>
+
+                    {/* Button 3: Blue Subtitle <sub-title> */}
+                    <button
+                      type="button"
+                      onClick={() => wrapOrInsertTagInSubBlock('<sub-title>', '</sub-title>', 'العنوان الفرعي')}
+                      className="h-7 px-2 flex items-center gap-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-300 rounded-lg shadow-2xs text-xs font-black transition-all cursor-pointer shrink-0 hover:scale-105 active:scale-95"
+                      title="وسم أزرق للعناوين الفرعية والخطوات والتفريعات: <sub-title>العنوان الفرعي</sub-title>"
+                    >
+                      <span className="w-2.5 h-2.5 rounded-full bg-blue-600 shrink-0 shadow-2xs"></span>
+                      <span>عنوان فرعي (أزرق)</span>
+                    </button>
+
+                    {/* Button 4: Formula / Law Red Box ***قانون*** */}
+                    <button
+                      type="button"
+                      onClick={() => wrapOrInsertTagInSubBlock('***دستور: $', '$***', 'قانون أو مبرهنة')}
+                      className="h-7 px-2 flex items-center gap-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-lg shadow-2xs text-xs font-bold transition-all cursor-pointer shrink-0 hover:scale-105 active:scale-95"
+                      title="قانون عام أو دستور رياضي ضمن إطار أحمر: ***دستور: $...$***"
+                    >
+                      <span>📐</span>
+                      <span>قانون / دستور</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Quick Action Buttons (Save without exiting + AI Rephrase) */}
+                <div className="flex items-center gap-2 shrink-0 mr-auto">
+                  {/* Toolbar Save Button */}
                   <button
-                    key={sIdx}
                     type="button"
-                    onClick={() => insertSymbolToSubBlock(sym)}
-                    className="px-2 py-1 bg-white hover:bg-violet-50 hover:text-violet-700 text-slate-700 text-xs font-bold border border-slate-200 rounded-lg shadow-2xs transition-all cursor-pointer shrink-0 font-mono"
+                    onClick={() => handleSaveSubBlockEdit(false)}
+                    disabled={isSavingSubBlock}
+                    className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white text-xs font-black rounded-lg shadow-sm transition-all flex items-center gap-1.5 cursor-pointer shrink-0 disabled:opacity-50"
+                    title="حفظ التعديلات في قاعدة البيانات دون الخروج من النافذة"
                   >
-                    {sym}
+                    {isSavingSubBlock ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+                    <span>{isSavingSubBlock ? 'جاري الحفظ...' : 'حفظ'}</span>
                   </button>
-                ))}
+
+                  {/* AI Rephrase Button */}
+                  <button
+                    type="button"
+                    onClick={handleSubBlockAiRephrase}
+                    disabled={isSubBlockAiRephrasing}
+                    className="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-black rounded-lg shadow-sm transition-all flex items-center gap-1.5 cursor-pointer shrink-0 disabled:opacity-50"
+                  >
+                    <Sparkles size={13} className={isSubBlockAiRephrasing ? 'animate-spin' : ''} />
+                    {isSubBlockAiRephrasing ? 'جاري التحسين...' : 'صياغة ذكية بالـ AI'}
+                  </button>
+                </div>
+
               </div>
-              <button
-                type="button"
-                onClick={handleSubBlockAiRephrase}
-                disabled={isSubBlockAiRephrasing}
-                className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black rounded-lg shadow-sm transition-all flex items-center gap-1.5 cursor-pointer shrink-0"
-              >
-                <Sparkles size={13} className={isSubBlockAiRephrasing ? 'animate-spin' : ''} />
-                {isSubBlockAiRephrasing ? 'جاري التحسين بالذكاء الاصطناعي...' : 'صياغة ذكية بالـ AI'}
-              </button>
+
+              {/* In-Modal Save Notice Banner */}
+              {subBlockSaveNotice && (
+                <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 px-3.5 py-1.5 rounded-xl text-xs font-black flex items-center justify-between shadow-2xs animate-fadeIn">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle size={15} className="text-emerald-700 shrink-0" />
+                    <span>{subBlockSaveNotice} — تم تخزين كافة التغييرات بأمان، ويمكنك متابعة التعديل مباشرة دون مغادرة النافذة.</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSubBlockSaveNotice(null)}
+                    className="text-emerald-800 hover:text-emerald-950 p-0.5 rounded cursor-pointer"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Split Screen Body: Right = Text Editor, Left = Live Math & Formatted Preview */}
@@ -7726,12 +8401,32 @@ export const LessonSummariesDashboard: React.FC = () => {
                 <div className="flex flex-col flex-1">
                   <label className="text-xs font-black text-slate-700 mb-1.5 flex items-center justify-between">
                     <span>📝 {editingSubBlockModal.secondaryFieldKey ? (editingSubBlockModal.fieldName || 'نص التمرين (اليمين)') : 'التحرير اليدوي لكتابة وصياغة النص والمعادلات (اليمين)'}:</span>
-                    <span className="text-[10px] text-violet-600 font-bold">يدعم معادلات LaTeX وصيغ الرياضيات</span>
+                    <span className="text-[10px] text-violet-600 font-bold">يدعم معادلات LaTeX وصيغ الرياضيات والأيقونات</span>
                   </label>
+                  
+                  {/* Tag Usage Guidance Strip */}
+                  <div className="flex flex-wrap items-center gap-2 mb-2 p-1.5 bg-slate-50 rounded-lg border border-slate-200/90 text-[11px]">
+                    <span className="font-bold text-slate-500 shrink-0">قواعد الوسوم:</span>
+                    <span className="inline-flex items-center gap-1 bg-[#ede9fe] text-[#4c1d95] px-2 py-0.5 rounded font-black border border-violet-300/80 text-[10px]" title="تظليل فوسفوري بنفسجي ناعم">
+                      <span>🖍️ **عبارة**</span>
+                      <span className="font-normal text-violet-800">(تظليل كلمات مفتاحية أثناء الدراسة — وليس لعناوين الفقرات)</span>
+                    </span>
+                    <span className="inline-flex items-center gap-1 bg-red-50 text-red-700 px-2 py-0.5 rounded font-bold border border-red-200 text-[10px]">
+                      <span className="w-1.5 h-1.5 rounded-full bg-red-600"></span>
+                      <span>&lt;main-title&gt; (عنوان رئيسي أحمر)</span>
+                    </span>
+                    <span className="inline-flex items-center gap-1 bg-blue-50 text-blue-700 px-2 py-0.5 rounded font-bold border border-blue-200 text-[10px]">
+                      <span className="w-1.5 h-1.5 rounded-full bg-blue-600"></span>
+                      <span>&lt;sub-title&gt; (عنوان فرعي أزرق)</span>
+                    </span>
+                  </div>
+
                   <textarea
+                    ref={subBlockPrimaryTextareaRef}
+                    onFocus={() => setActiveSubBlockEditorField('primary')}
                     value={editingSubBlockModal.fieldValue}
                     onChange={(e) => setEditingSubBlockModal(prev => prev ? { ...prev, fieldValue: e.target.value } : null)}
-                    placeholder="اكتب هنا النص المعدل، يمكنك إضافة معادلات LaTeX أو فقرات مفسرة..."
+                    placeholder="اكتب هنا النص المعدل، يمكنك إضافة معادلات LaTeX أو فقرات مفسرة وأيقونات..."
                     className="w-full flex-1 min-h-[160px] p-3 text-xs sm:text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-500 transition-all font-sans leading-relaxed resize-none bg-slate-50/50"
                     dir="rtl"
                   />
@@ -7744,6 +8439,8 @@ export const LessonSummariesDashboard: React.FC = () => {
                       <span className="text-[10px] text-emerald-600 font-bold">تعديل خطوات الحل</span>
                     </label>
                     <textarea
+                      ref={subBlockSecondaryTextareaRef}
+                      onFocus={() => setActiveSubBlockEditorField('secondary')}
                       value={editingSubBlockModal.secondaryFieldValue || ''}
                       onChange={(e) => setEditingSubBlockModal(prev => prev ? { ...prev, secondaryFieldValue: e.target.value } : null)}
                       placeholder="اكتب هنا خطوات الحل النموذجي والتفصيلي..."
@@ -7794,22 +8491,48 @@ export const LessonSummariesDashboard: React.FC = () => {
             </div>
 
             {/* Modal Footer */}
-            <div className="bg-slate-50 px-6 py-4 border-t border-slate-200 flex justify-between items-center shrink-0">
-              <button
-                type="button"
-                onClick={() => setEditingSubBlockModal(null)}
-                className="px-5 py-2.5 bg-white border border-slate-300 hover:bg-slate-100 text-gray-700 font-bold rounded-xl text-xs sm:text-sm transition-all cursor-pointer"
-              >
-                إلغاء ❌
-              </button>
-              <button
-                type="button"
-                onClick={handleSaveSubBlockEdit}
-                className="px-6 py-2.5 bg-violet-600 hover:bg-violet-700 text-white font-extrabold rounded-xl text-xs sm:text-sm shadow-lg shadow-violet-600/20 transition-all flex items-center gap-1.5 cursor-pointer"
-              >
-                <Save size={15} />
-                حفظ التعديل الفرعي المعتمد 💾
-              </button>
+            <div className="bg-slate-50 px-6 py-4 border-t border-slate-200 flex flex-wrap justify-between items-center gap-3 shrink-0">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setEditingSubBlockModal(null)}
+                  className="px-5 py-2.5 bg-white border border-slate-300 hover:bg-slate-100 text-gray-700 font-bold rounded-xl text-xs sm:text-sm transition-all cursor-pointer"
+                >
+                  إلغاء ❌
+                </button>
+                {subBlockSaveNotice && (
+                  <div className="hidden sm:flex items-center gap-1.5 text-xs text-emerald-800 bg-emerald-100/90 border border-emerald-300 px-3 py-1.5 rounded-xl font-black">
+                    <CheckCircle size={14} className="text-emerald-600" />
+                    <span>تم الحفظ بنجاح ✓ النافذة لا تزال مفتوحة</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2.5">
+                {/* زر "حفظ" لحفظ التعديلات بدون الخروج من النافذة */}
+                <button
+                  type="button"
+                  onClick={() => handleSaveSubBlockEdit(false)}
+                  disabled={isSavingSubBlock}
+                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-black rounded-xl text-xs sm:text-sm shadow-md shadow-emerald-600/20 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  title="حفظ التعديلات في قاعدة البيانات بدون الخروج من النافذة"
+                >
+                  {isSavingSubBlock ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
+                  <span>{isSavingSubBlock ? 'جاري الحفظ...' : 'حفظ 💾'}</span>
+                </button>
+
+                {/* زر حفظ واعتماد وإغلاق */}
+                <button
+                  type="button"
+                  onClick={() => handleSaveSubBlockEdit(true)}
+                  disabled={isSavingSubBlock}
+                  className="px-6 py-2.5 bg-violet-600 hover:bg-violet-700 active:bg-violet-800 text-white font-black rounded-xl text-xs sm:text-sm shadow-lg shadow-violet-600/20 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  title="حفظ التعديلات واعتمادها وإغلاق النافذة"
+                >
+                  <Check size={15} />
+                  <span>حفظ وإغلاق ✓</span>
+                </button>
+              </div>
             </div>
 
           </div>
@@ -8409,6 +9132,285 @@ export const LessonSummariesDashboard: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* 📄 Add Lesson Modal: Theoretical or Practice from Scratch or PDF */}
+      {addLessonModal && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm overflow-y-auto">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden text-right border border-slate-150 animate-fade-in" dir="rtl">
+            {/* Header */}
+            <div className={`px-6 py-5 text-white flex justify-between items-center ${addLessonModal.type === 'theory' ? 'bg-gradient-to-r from-emerald-600 to-teal-700' : 'bg-gradient-to-r from-amber-600 to-orange-700'}`}>
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-white/15 flex items-center justify-center text-xl shadow-xs">
+                  {addLessonModal.type === 'theory' ? '📘' : '✍️'}
+                </div>
+                <div>
+                  <h3 className="text-base font-black font-sans">
+                    {addLessonModal.type === 'theory' ? 'إضافة درس نظري جديد إلى الكراسة' : 'إضافة درس تدرّب وتطبيقات جديد إلى الكراسة'}
+                  </h3>
+                  <p className="text-xs text-white/80 font-medium">
+                    اختر طريقة الإضافة المناسبة: درس فارغ للكتابة المباشرة، أو استيراد ذكي من ملف PDF.
+                  </p>
+                </div>
+              </div>
+              <button 
+                onClick={() => {
+                  setAddLessonModal(null);
+                  setPdfLessonFile(null);
+                }}
+                className="text-white/80 hover:text-white hover:bg-white/15 p-2 rounded-xl transition-all cursor-pointer"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 space-y-6">
+              {/* Option Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Option 1: Manual Empty */}
+                <div 
+                  onClick={() => {
+                    const isTheory = addLessonModal.type === 'theory';
+                    setAddLessonModal(null);
+                    if (isTheory) {
+                      handleAddNewManualSection();
+                    } else {
+                      handleAddNewPracticeOnlySection();
+                    }
+                  }}
+                  className="p-5 rounded-2xl border-2 border-slate-200 hover:border-violet-500 bg-slate-50/50 hover:bg-violet-50/30 transition-all cursor-pointer group flex flex-col justify-between"
+                >
+                  <div className="space-y-2">
+                    <div className="w-10 h-10 rounded-xl bg-violet-100 text-violet-700 flex items-center justify-center text-lg font-black group-hover:scale-110 transition-transform">
+                      ✍️
+                    </div>
+                    <h4 className="text-sm font-black text-slate-900 group-hover:text-violet-700 transition-colors">
+                      إضافة درس يدوي فارغ
+                    </h4>
+                    <p className="text-xs text-slate-500 font-medium leading-relaxed">
+                      {addLessonModal.type === 'theory' 
+                        ? 'إنشاء درس نظري جديد للكتابة المباشرة وتنسيق المفاهيم والقواعد والأمثلة والمطبات يدوياً.' 
+                        : 'إنشاء درس تدرّب فارغ للبدء بإضافة التمارين وحلولها واستراتيجياتها يدوياً.'}
+                    </p>
+                  </div>
+                  <div className="pt-4 flex items-center gap-1.5 text-xs font-black text-violet-600">
+                    <span>البدء بالكتابة اليدوية</span>
+                    <span>←</span>
+                  </div>
+                </div>
+
+                {/* Option 2: From PDF */}
+                <div className={`p-5 rounded-2xl border-2 transition-all ${pdfLessonFile ? 'border-emerald-500 bg-emerald-50/30' : 'border-slate-200 bg-slate-50/50'}`}>
+                  <div className="space-y-2">
+                    <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center text-lg font-black">
+                      📄
+                    </div>
+                    <h4 className="text-sm font-black text-slate-900">
+                      استخراج وإضافة من ملف PDF
+                    </h4>
+                    <p className="text-xs text-slate-500 font-medium leading-relaxed">
+                      ارفع ملف PDF وسيحلله الذكاء الاصطناعي ويصوغ الدرس النظري أو مسائل التدرّب وحلولها النموذجية تلقائياً!
+                    </p>
+                  </div>
+
+                  {/* PDF File Input */}
+                  <div className="pt-3">
+                    <label className="block">
+                      <input 
+                        type="file" 
+                        accept=".pdf"
+                        disabled={isProcessingPdfLesson}
+                        onChange={e => {
+                          const file = e.target.files?.[0];
+                          if (file) setPdfLessonFile(file);
+                        }}
+                        className="hidden" 
+                        id="pdfLessonFileInput"
+                      />
+                      <label 
+                        htmlFor="pdfLessonFileInput" 
+                        className={`w-full py-2.5 px-3 rounded-xl border border-dashed flex items-center justify-center gap-2 text-xs font-bold cursor-pointer transition-all ${pdfLessonFile ? 'bg-emerald-100/70 border-emerald-400 text-emerald-900' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'}`}
+                      >
+                        <UploadCloud size={16} />
+                        <span className="truncate max-w-[180px]">
+                          {pdfLessonFile ? pdfLessonFile.name : 'اختر ملف PDF من جهازك'}
+                        </span>
+                      </label>
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              {/* Progress Bar / Spinner */}
+              {isProcessingPdfLesson && (
+                <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center gap-3 animate-fade-in">
+                  <Loader2 size={20} className="text-emerald-600 animate-spin shrink-0" />
+                  <span className="text-xs font-black text-emerald-900 font-sans">
+                    {pdfLessonProgress || 'جاري معالجة واستخراج الدرس من ملف الـ PDF...'}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="bg-slate-50 px-6 py-4 border-t border-slate-100 flex justify-between items-center">
+              <button
+                type="button"
+                onClick={() => {
+                  setAddLessonModal(null);
+                  setPdfLessonFile(null);
+                }}
+                disabled={isProcessingPdfLesson}
+                className="px-5 py-2.5 bg-white border border-slate-300 hover:bg-slate-100 text-gray-700 font-bold rounded-xl text-xs transition-all cursor-pointer disabled:opacity-50"
+              >
+                إلغاء ❌
+              </button>
+
+              {pdfLessonFile && (
+                <button
+                  type="button"
+                  onClick={() => handleImportLessonFromPdf(addLessonModal.type)}
+                  disabled={isProcessingPdfLesson}
+                  className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black rounded-xl text-xs shadow-md transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  {isProcessingPdfLesson ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+                  <span>{isProcessingPdfLesson ? 'جاري الاستخراج والتوليد...' : 'استخراج وإضافة الدرس من الـ PDF 🚀'}</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 📸 Add Exercise Choice Modal (Manual vs Photo Extraction) */}
+      {addExerciseChoiceModal && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm overflow-y-auto">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden text-right border border-slate-150 animate-fade-in" dir="rtl">
+            <div className="bg-gradient-to-r from-violet-700 to-indigo-700 px-6 py-5 text-white flex justify-between items-center shadow-md">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-white/15 flex items-center justify-center text-xl shadow-xs">
+                  ✍️
+                </div>
+                <div>
+                  <h3 className="text-base font-black font-sans">
+                    إضافة تمرين جديد إلى فقرة التدرّب
+                  </h3>
+                  <p className="text-xs text-violet-200 font-medium">
+                    اختر طريقة إضافة التمرين: كتابة يدوية أو استخراج ذكي من صورة.
+                  </p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setAddExerciseChoiceModal(null)}
+                className="text-white/80 hover:text-white hover:bg-white/15 p-2 rounded-xl transition-all cursor-pointer"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              {/* Option 1: Manual Blank */}
+              <div
+                onClick={() => {
+                  const sec = summarySections.find(s => s.id === addExerciseChoiceModal.sectionId);
+                  const nextIndex = (sec?.practiceExercises?.length || 0) + 1;
+                  const newExId = `ex_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+                  const newEx: PracticeExercise = {
+                    id: newExId,
+                    title: `تمرين تدرّب #${nextIndex}`,
+                    questionText: '',
+                    strategyText: '',
+                    solutionText: '',
+                    svgCode: ''
+                  };
+                  const sId = addExerciseChoiceModal.sectionId;
+                  setAddExerciseChoiceModal(null);
+                  setEditingExModal({
+                    sectionId: sId,
+                    isPractical: false,
+                    exercise: newEx
+                  });
+                }}
+                className="p-5 rounded-2xl border-2 border-slate-200 hover:border-violet-500 bg-slate-50/50 hover:bg-violet-50/30 transition-all cursor-pointer flex items-center justify-between group"
+              >
+                <div className="flex items-center gap-3.5">
+                  <div className="w-11 h-11 rounded-2xl bg-violet-100 text-violet-700 flex items-center justify-center text-xl font-black group-hover:scale-110 transition-transform">
+                    ✍️
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black text-slate-900 group-hover:text-violet-700 transition-colors">
+                      كتابة التمرين يدوياً
+                    </h4>
+                    <p className="text-xs text-slate-500 font-medium">
+                      فتح المحرر لكتابة السؤال، فكرة الحل، وخطوات الحل النموذجي.
+                    </p>
+                  </div>
+                </div>
+                <span className="text-violet-600 font-black text-sm">←</span>
+              </div>
+
+              {/* Option 2: From Photo */}
+              <div
+                onClick={() => {
+                  setTargetExerciseSectionId(addExerciseChoiceModal.sectionId);
+                  exerciseImageFileInputRef.current?.click();
+                }}
+                className="p-5 rounded-2xl border-2 border-amber-200 hover:border-amber-500 bg-amber-50/40 hover:bg-amber-50/80 transition-all cursor-pointer flex items-center justify-between group"
+              >
+                <div className="flex items-center gap-3.5">
+                  <div className="w-11 h-11 rounded-2xl bg-amber-100 text-amber-800 flex items-center justify-center text-xl font-black group-hover:scale-110 transition-transform">
+                    📸
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black text-slate-900 group-hover:text-amber-700 transition-colors">
+                      استخراج التمرين وحله من صورة
+                    </h4>
+                    <p className="text-xs text-slate-500 font-medium">
+                      التقط أو اختر صورة للمسألة من الكتاب ليقوم الذكاء الاصطناعي بقراءتها وحلها فوراً!
+                    </p>
+                  </div>
+                </div>
+                <span className="text-amber-700 font-black text-sm">←</span>
+              </div>
+
+              {/* Extracting Indicator */}
+              {isExtractingExerciseImage && (
+                <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl flex items-center gap-3 animate-fade-in">
+                  <Loader2 size={20} className="text-amber-600 animate-spin shrink-0" />
+                  <span className="text-xs font-black text-amber-900 font-sans">
+                    {exerciseImageExtractingProgress || 'جاري قراءة وتحليل الصورة بالذكاء الاصطناعي...'}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="bg-slate-50 px-6 py-4 border-t border-slate-100 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setAddExerciseChoiceModal(null)}
+                className="px-5 py-2.5 bg-white border border-slate-300 hover:bg-slate-100 text-gray-700 font-bold rounded-xl text-xs transition-all cursor-pointer"
+              >
+                إغلاق ❌
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hidden File Input for Exercise Image Extraction */}
+      <input 
+        type="file"
+        ref={exerciseImageFileInputRef}
+        accept="image/*"
+        className="hidden"
+        onChange={e => {
+          const file = e.target.files?.[0];
+          if (file && targetExerciseSectionId) {
+            handleProcessExerciseFromImageFile(file, targetExerciseSectionId);
+          }
+          e.target.value = '';
+        }}
+      />
 
       {/* Document Metadata Edit Modal */}
       {editingBookletDoc && (

@@ -15,7 +15,8 @@ import {
   BookOpen,
   AlertTriangle,
   Zap,
-  BookmarkCheck
+  BookmarkCheck,
+  Printer
 } from 'lucide-react';
 import { 
   db, 
@@ -34,6 +35,8 @@ import {
 import { InteractiveMindMap } from './InteractiveMindMap';
 import { MathRenderer } from './MathRenderer';
 import { SyncControlButton } from './SyncControlButton';
+import { LocalDatabaseIdBadge } from './common/LocalDatabaseIdBadge';
+import { UnitMindMapPrintPreviewModal } from './UnitMindMapPrintPreviewModal';
 
 interface UnitMindMapSectionProps {
   document: Document;
@@ -50,6 +53,7 @@ export const UnitMindMapSection: React.FC<UnitMindMapSectionProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [isPrintModalOpen, setIsPrintModalOpen] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<'graph' | 'matrix' | 'schema'>('graph');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -235,31 +239,31 @@ export const UnitMindMapSection: React.FC<UnitMindMapSectionProps> = ({
       )}
 
       {/* Header */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white p-4 rounded-2xl border border-gray-200 shadow-xs">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-white p-4 sm:p-5 rounded-2xl border border-gray-200 shadow-xs">
         <div className="flex items-center gap-3">
-          <div className="w-12 h-12 bg-indigo-50 text-indigo-700 rounded-xl flex items-center justify-center border border-indigo-100">
-            <Share2 size={24} />
+          <div className="w-11 h-11 sm:w-12 sm:h-12 bg-indigo-50 text-indigo-700 rounded-xl flex items-center justify-center border border-indigo-100 shrink-0">
+            <Share2 size={22} />
           </div>
           <div>
-            <h3 className="text-lg font-black text-slate-900">{unitMindMap.title}</h3>
-            <p className="text-xs text-slate-500 font-medium">شبكة تفاعلية للمفاهيم، المبرهنات، والروابط المعرفية والفخاخ</p>
+            <h3 className="text-base sm:text-lg font-black text-slate-900 leading-tight">{unitMindMap.title}</h3>
+            <p className="text-[11px] sm:text-xs text-slate-500 font-medium">شبكة تفاعلية للمفاهيم، المبرهنات، والروابط المعرفية والفخاخ</p>
           </div>
         </div>
         
-        {/* Navigation Tabs */}
-        <div className="flex bg-slate-100 p-1 rounded-xl">
+        {/* Navigation Tabs - Horizontal Scroll on Mobile */}
+        <div className="flex bg-slate-100/90 p-1 rounded-xl overflow-x-auto no-scrollbar max-w-full shrink-0">
           <button
             onClick={() => setActiveTab('graph')}
-            className={`px-3.5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer flex items-center gap-1.5 ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
               activeTab === 'graph' ? 'bg-white shadow-xs text-indigo-700' : 'text-slate-500 hover:text-slate-700'
             }`}
           >
             <Layers size={14} />
-            <span>الخريطة الشبكية (Graph)</span>
+            <span>الخريطة الشبكية (Graph 📱)</span>
           </button>
           <button
             onClick={() => setActiveTab('matrix')}
-            className={`px-3.5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer flex items-center gap-1.5 ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
               activeTab === 'matrix' ? 'bg-white shadow-xs text-indigo-700' : 'text-slate-500 hover:text-slate-700'
             }`}
           >
@@ -268,7 +272,7 @@ export const UnitMindMapSection: React.FC<UnitMindMapSectionProps> = ({
           </button>
           <button
             onClick={() => setActiveTab('schema')}
-            className={`px-3.5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer flex items-center gap-1.5 ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
               activeTab === 'schema' ? 'bg-white shadow-xs text-indigo-700' : 'text-slate-500 hover:text-slate-700'
             }`}
           >
@@ -278,9 +282,10 @@ export const UnitMindMapSection: React.FC<UnitMindMapSectionProps> = ({
         </div>
 
         {/* Action Buttons */}
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap justify-end">
           {isAdmin && (
             <>
+              <LocalDatabaseIdBadge id={unitMindMap.id} tableLabel="unitMindMaps" compact={false} />
               <SyncControlButton
                 table="unitMindMaps"
                 id={unitMindMap.id!}
@@ -304,6 +309,15 @@ export const UnitMindMapSection: React.FC<UnitMindMapSectionProps> = ({
             title="تحميل كصورة SVG عالية الدقة"
           >
             <Download size={18} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsPrintModalOpen(true)}
+            className="px-3 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+            title="معاينة وطباعة الخريطة الذهنية كملف PDF مستقل"
+          >
+            <Printer size={15} />
+            <span>طباعة الخريطة (مستقلة) 🖨️</span>
           </button>
           <button
             onClick={() => setIsFullscreen(true)}
@@ -477,6 +491,16 @@ export const UnitMindMapSection: React.FC<UnitMindMapSectionProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Standalone Mind Map Print Preview Modal */}
+      {isPrintModalOpen && unitMindMap && (
+        <UnitMindMapPrintPreviewModal
+          isOpen={isPrintModalOpen}
+          onClose={() => setIsPrintModalOpen(false)}
+          document={document}
+          mindMap={unitMindMap}
+        />
       )}
     </div>
   );

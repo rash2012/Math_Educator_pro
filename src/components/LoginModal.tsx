@@ -13,9 +13,14 @@ import {
   Eye,
   EyeOff,
   CheckCircle2,
-  HelpCircle
+  HelpCircle,
+  Settings,
+  Database,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import { loginAdmin, sendPasswordResetEmail } from '../services/authService';
+import { getSupabaseConfig, saveSupabaseConfig } from '../services/supabaseClient';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -39,12 +44,25 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   onClose
 }) => {
   const [email, setEmail] = useState('abosamsyria@gmail.com');
-  const [password, setPassword] = useState('');
+  const [password, setPassword] = useState('zxc0123');
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [resetSuccessMessage, setResetSuccessMessage] = useState<string | null>(null);
+
+  // Supabase Config Accordion
+  const [showSupabaseSettings, setShowSupabaseSettings] = useState(false);
+  const initialCfg = getSupabaseConfig();
+  const [supabaseUrlInput, setSupabaseUrlInput] = useState(initialCfg.url || '');
+  const [supabaseKeyInput, setSupabaseKeyInput] = useState(initialCfg.anonKey || '');
+  const [configSavedNotice, setConfigSavedNotice] = useState<string | null>(null);
+
+  const handleSaveSupabaseConfig = () => {
+    saveSupabaseConfig(supabaseUrlInput, supabaseKeyInput);
+    setConfigSavedNotice('تم حفظ إعدادات Supabase بنجاح وتحديث جلسة الاتصال!');
+    setTimeout(() => setConfigSavedNotice(null), 4000);
+  };
 
   if (!isOpen) return null;
 
@@ -226,6 +244,80 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
                 </button>
               </div>
+              <div className="mt-1.5 flex items-center justify-between text-[11px] text-slate-500 font-medium">
+                <span>
+                  كلمة المرور الافتراضية للإدارة: <span className="font-mono font-black text-indigo-700 select-all">zxc0123</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPassword('zxc0123')}
+                  className="text-indigo-600 hover:text-indigo-800 font-bold hover:underline cursor-pointer"
+                >
+                  استخدام الافتراضية
+                </button>
+              </div>
+            </div>
+
+            {/* Supabase Connection Accordion (Optional / Advanced) */}
+            <div className="pt-1">
+              <button
+                type="button"
+                onClick={() => setShowSupabaseSettings(!showSupabaseSettings)}
+                className="w-full flex items-center justify-between p-2 rounded-xl bg-slate-100/80 hover:bg-slate-200/80 text-slate-700 text-[11px] font-bold transition-all cursor-pointer border border-slate-200"
+              >
+                <div className="flex items-center gap-1.5">
+                  <Database size={13} className="text-indigo-600" />
+                  <span>إعدادات خادم Supabase السحابي (اختياري / في حال توفر مشروع)</span>
+                </div>
+                {showSupabaseSettings ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              </button>
+
+              {showSupabaseSettings && (
+                <div className="mt-2 p-3 bg-slate-50 rounded-2xl border border-slate-200 space-y-2.5 animate-fade-in text-[11px]">
+                  <div>
+                    <label className="block text-slate-700 font-black mb-1">
+                      رابط المشروع (Project URL):
+                    </label>
+                    <input
+                      type="url"
+                      dir="ltr"
+                      value={supabaseUrlInput}
+                      onChange={(e) => setSupabaseUrlInput(e.target.value)}
+                      placeholder="https://xyzcompany.supabase.co"
+                      className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-700 font-black mb-1">
+                      المفتاح العام (Anon Key):
+                    </label>
+                    <input
+                      type="text"
+                      dir="ltr"
+                      value={supabaseKeyInput}
+                      onChange={(e) => setSupabaseKeyInput(e.target.value)}
+                      placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                      className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+
+                  {configSavedNotice && (
+                    <div className="p-2 bg-emerald-50 text-emerald-800 rounded-lg font-bold flex items-center gap-1.5">
+                      <CheckCircle2 size={13} className="text-emerald-600 shrink-0" />
+                      <span>{configSavedNotice}</span>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={handleSaveSupabaseConfig}
+                    className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg text-xs cursor-pointer shadow-xs transition-colors"
+                  >
+                    حفظ إعدادات الربط
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Submit Button */}

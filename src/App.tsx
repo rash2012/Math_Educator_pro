@@ -16,6 +16,7 @@ import { ScrollToTop } from './components/ScrollToTop';
 import { AuthModal, type UserSession, type StudentAuthData } from './components/AuthModal';
 import { StudentPortal } from './components/StudentPortal';
 import { LoginModal } from './components/LoginModal';
+import { SyncConfirmModal } from './components/SyncConfirmModal';
 import { getCurrentSession, subscribeToAuthChanges, logoutAdmin } from './services/authService';
 
 type ViewState = 'dashboard' | 'upload' | 'view' | 'merge' | 'test-generator' | 'tests-dashboard' | 'question-bank' | 'lesson-summary' | 'exam-summary' | 'past-papers' | 'exercises-problems' | 'ai-drafts';
@@ -477,6 +478,9 @@ export default function App() {
         onLoginSuccess={handleLoginSuccess}
         initialRole={userSession.role}
       />
+
+      {/* Global Cloud Sync Anti-Duplication Confirmation Modal */}
+      <SyncConfirmModal />
 
       {/* Global Floating Scroll To Top Button */}
       <ScrollToTop />

@@ -810,8 +810,10 @@ export type Database = {
           id: string
           item_type: string | null
           order_index: number
+          order_title: string | null
           paper_id: string | null
           question: string
+          section_type: string | null
           solution: string
           solution_svg_code: string | null
           sub_parts: Json | null
@@ -822,8 +824,10 @@ export type Database = {
           id?: string
           item_type?: string | null
           order_index: number
+          order_title?: string | null
           paper_id?: string | null
           question: string
+          section_type?: string | null
           solution: string
           solution_svg_code?: string | null
           sub_parts?: Json | null
@@ -834,8 +838,10 @@ export type Database = {
           id?: string
           item_type?: string | null
           order_index?: number
+          order_title?: string | null
           paper_id?: string | null
           question?: string
+          section_type?: string | null
           solution?: string
           solution_svg_code?: string | null
           sub_parts?: Json | null

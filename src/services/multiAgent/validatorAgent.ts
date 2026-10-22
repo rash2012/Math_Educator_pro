@@ -26,6 +26,24 @@ export class ValidatorAgent {
       return { text: text || '', issues };
     }
 
+    // 0. Clean and collapse consecutive double backslashes in LaTeX and math symbols
+    // e.g. \\vec -> \vec, \\frac -> \frac, \\lim -> \lim, \\overrightarrow -> \overrightarrow, \\( -> \(, \\[ -> \[, \\; -> \;, \\| -> \|
+    if (/\\{2,}/.test(repairedText)) {
+      issues.push({
+        type: 'latex_syntax',
+        severity: 'warning',
+        message: 'تم رصد شرطات مائلة مزدوجة \\\\ متتالية في كود LaTeX وتصحيحها تلقائياً إلى شرطة مائلة مفردة \\ لضمان ظهور الرموز بشكل صحيح في KaTeX.',
+        autoFixAvailable: true,
+      });
+      repairedText = repairedText
+        .replace(/\\{2,}\s*\\hline/g, '\\\\ \\hline')
+        .replace(
+          /\\{2,}(?=(vec|overrightarrow|overline|underline|frac|sqrt|lim|to|alpha|beta|gamma|theta|lambda|mu|sigma|omega|pi|infty|Delta|cdot|times|pm|le|ge|neq|in|subset|int|ln|log|exp|sin|cos|tan|cot|sec|csc|arcsin|arccos|arctan|sinh|cosh|tanh|det|dim|ker|deg|max|min|sup|inf|sum|prod|cup|cap|lor|land|forall|exists|equiv|approx|sim|cong|partial|nabla|circ|bullet|angle|triangle|quad|qquad|left|right)\b)/g,
+          '\\'
+        )
+        .replace(/\\{2,}([()\[\]{}|;:!])/g, '\\$1');
+    }
+
     // 1. Strict Single Dollar Rule: Convert all $$...$$ to $...$
     if (repairedText.includes('$$')) {
       issues.push({
@@ -274,4 +292,52 @@ export class ValidatorAgent {
       issues,
     };
   }
+
+  /**
+   * Deterministic validator and auto-repair for Question Bank items (MCQ and Essay):
+   * - Enforces single dollar rule ($ ... $) strictly, replacing $$ with $
+   * - Restores missing backslashes on math keywords (\frac, \sqrt, \vec, \overrightarrow, \ln, \exp, \lim, \to, etc.)
+   * - Replaces Syrian curriculum violations ("دالة" -> "تابع", vector cross product -> \cdot, \sum -> \cdots)
+   * - Applies to question, options (subParts), solution, and aiGuidance
+   */
+  static validateAndRepairQuestionBankItem<T extends any>(item: T): T {
+    if (!item || typeof item !== 'object') return item;
+
+    const sanitize = (val: any): string => {
+      if (!val || typeof val !== 'string') return val || '';
+      return ValidatorAgent.validateAndRepairLatex(val).text;
+    };
+
+    const sanitizeCurriculum = (text: string): string => {
+      if (!text || typeof text !== 'string') return text || '';
+      return text
+        .replace(/(\b|[^\u0600-\u06FF])دوال(\b|[^\u0600-\u06FF])/g, '$1توابع$2')
+        .replace(/(\b|[^\u0600-\u06FF])الدوال(\b|[^\u0600-\u06FF])/g, '$1التوابع$2')
+        .replace(/(\b|[^\u0600-\u06FF])دالة(\b|[^\u0600-\u06FF])/g, '$1تابع$2')
+        .replace(/(\b|[^\u0600-\u06FF])الدالة(\b|[^\u0600-\u06FF])/g, '$1التابع$2');
+    };
+
+    const cleanField = (val: any) => sanitizeCurriculum(sanitize(val));
+
+    const copy = { ...item } as any;
+
+    if (copy.question) {
+      copy.question = cleanField(copy.question);
+    }
+    if (copy.solution) {
+      copy.solution = cleanField(copy.solution);
+    }
+    if (copy.aiGuidance) {
+      copy.aiGuidance = cleanField(copy.aiGuidance);
+    }
+    if (copy.topic) {
+      copy.topic = cleanField(copy.topic);
+    }
+    if (Array.isArray(copy.subParts)) {
+      copy.subParts = copy.subParts.map((sp: any) => cleanField(sp));
+    }
+
+    return copy;
+  }
 }
+

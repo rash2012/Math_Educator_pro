@@ -6,17 +6,25 @@ import { DocumentMetadataModal } from './DocumentMetadataModal';
 import { 
   ArrowRight, Plus, Trash2, Edit3, Printer, Download, Upload, Save, X, Eye, EyeOff, 
   FileText, Globe, GraduationCap, BookOpen, Layers, BookMarked,
-  Sparkles, Loader2, Filter, Settings2, CheckCircle2, Cloud, Video, ExternalLink, Play
+  Sparkles, Loader2, Filter, Settings2, CheckCircle2, Cloud, Video, ExternalLink, Play,
+  UploadCloud, AlertCircle
 } from 'lucide-react';
 import { SyncControlButton } from './SyncControlButton';
 import { UnitSyncIndicator } from './UnitSyncIndicator';
+import { LocalDatabaseIdBadge } from './common/LocalDatabaseIdBadge';
+import { SupabaseConfigModal } from './common/SupabaseConfigModal';
+import { getSupabaseConfig } from '../services/supabaseClient';
+import { syncDocumentHierarchy, type SyncResult } from '../services/supabaseSync';
 import { CustomDialog } from './ui/CustomDialog';
 import { COUNTRIES, GRADES, SUBJECTS, ALL_DEFAULT_MATH_UNITS, DEFAULT_METADATA } from '../constants/academicData';
 import { 
   generatePracticeExerciseSolutionAI,
   generatePracticeExerciseSvgAI,
   shortenPracticeExerciseSolutionAI,
-  extractUnitExercisesFromReference
+  extractUnitExercisesFromReference,
+  separateStrategyAndSolution,
+  regenerateExerciseStrategyAI,
+  cleanStrategyMetaHeaders
 } from '../services/gemini';
 
 // Modular Subcomponents
@@ -28,6 +36,7 @@ import {
   getFontFamilyCss
 } from './exercises/exercisePrintTypes';
 import { ExerciseCard } from './exercises/ExerciseCard';
+import { sanitizeLatexDoubleBackslashes } from './MathRenderer';
 import { ExerciseEditModal } from './exercises/ExerciseEditModal';
 import { ExerciseVerifyModal } from './exercises/ExerciseVerifyModal';
 import { ExercisePrintSettingsPanel } from './exercises/ExercisePrintSettingsModal';
@@ -107,7 +116,7 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
 
   const [aiLoading, setAiLoading] = useState<{
     exId: string;
-    type: 'solution' | 'shorten' | 'svg';
+    type: 'solution' | 'shorten' | 'svg' | 'strategy';
   } | null>(null);
 
   // Dialog State
@@ -123,6 +132,54 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
 
   // State to refresh aggregate sync indicator on booklet sync
   const [syncRefreshKey, setSyncRefreshKey] = useState(0);
+
+  // Quick Sync State for Booklet Cards
+  const [syncingDocId, setSyncingDocId] = useState<number | null>(null);
+  const [quickSyncResult, setQuickSyncResult] = useState<{
+    docTitle: string;
+    success: boolean;
+    message: string;
+  } | null>(null);
+  const [showSupabaseConfigModal, setShowSupabaseConfigModal] = useState(false);
+
+  const handleQuickSyncDoc = async (doc: Document) => {
+    if (!doc.id || syncingDocId) return;
+
+    const config = getSupabaseConfig();
+    if (!config.url || !config.anonKey) {
+      setShowSupabaseConfigModal(true);
+      return;
+    }
+
+    setSyncingDocId(doc.id);
+    setQuickSyncResult(null);
+
+    try {
+      const result: SyncResult = await syncDocumentHierarchy(doc.id, false);
+      if (result.success) {
+        setQuickSyncResult({
+          docTitle: doc.title,
+          success: true,
+          message: result.message || 'تمت المزامنة والاعتماد بنجاح إلى Supabase!'
+        });
+        setSyncRefreshKey(k => k + 1);
+      } else {
+        setQuickSyncResult({
+          docTitle: doc.title,
+          success: false,
+          message: result.message || 'تعذرت المزامنة'
+        });
+      }
+    } catch (err: any) {
+      setQuickSyncResult({
+        docTitle: doc.title,
+        success: false,
+        message: err.message || 'حدث خطأ أثناء المزامنة'
+      });
+    } finally {
+      setSyncingDocId(null);
+    }
+  };
 
   // Section title editing state
   const [editingSectionId, setEditingSectionId] = useState<number | null>(null);
@@ -365,7 +422,7 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
   };
 
   // Handlers for Practice Exercises
-  const handleSaveExercise = async (sectionId: number, updatedEx: PracticeExercise) => {
+  const handleSaveExercise = async (sectionId: number, updatedEx: PracticeExercise, closeModal: boolean = true) => {
     try {
       const sec = await db.lessonSections.get(sectionId);
       if (sec) {
@@ -381,25 +438,37 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
           await db.documents.update(activeDocId, { updatedAt: Date.now() });
         }
       }
-      setEditingExModal(null);
-      setVerifyingExModal(null);
+      if (closeModal) {
+        setEditingExModal(null);
+        setVerifyingExModal(null);
+      }
     } catch (err) {
       console.error(err);
       showAlert('خطأ', 'حدث خطأ أثناء حفظ التمرين.');
     }
   };
 
-  const handleDeleteExercise = async (sectionId: number, exerciseId: string) => {
-    showConfirm('تأكيد الحذف', 'هل أنت متأكد من حذف هذا التمرين بشكل نهائي؟', async () => {
-      const sec = await db.lessonSections.get(sectionId);
-      if (sec && sec.practiceExercises) {
-        const filtered = sec.practiceExercises.filter(e => e.id !== exerciseId);
-        await db.lessonSections.update(sectionId, { practiceExercises: filtered });
-        if (activeDocId) {
-          await db.documents.update(activeDocId, { updatedAt: Date.now() });
+  const handleDeleteExercise = async (sectionId: number, exerciseId: string, exTitle?: string) => {
+    showConfirm(
+      'تأكيد حذف التمرين 🗑️',
+      `هل أنت متأكد من حذف ${exTitle ? `"${exTitle}"` : 'هذا التمرين'} كاملاً مع كافة طلباته واستراتيجيته وحلوله؟ لا يمكن التراجع عن هذا الإجراء.`,
+      async () => {
+        try {
+          const sec = await db.lessonSections.get(sectionId);
+          if (sec && sec.practiceExercises) {
+            const filtered = sec.practiceExercises.filter(e => e.id !== exerciseId);
+            await db.lessonSections.update(sectionId, { practiceExercises: filtered });
+            if (activeDocId) {
+              await db.documents.update(activeDocId, { updatedAt: Date.now() });
+            }
+            showAlert('تم الحذف بنجاح ✓', 'تم حذف التمرين كاملاً من الكراسة بنجاح.');
+          }
+        } catch (err: any) {
+          console.error(err);
+          showAlert('خطأ', 'فشل حذف التمرين.');
         }
       }
-    });
+    );
   };
 
   const handleDuplicateExercise = async (sectionId: number, ex: PracticeExercise) => {
@@ -424,10 +493,14 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
   };
 
   // AI Generation Handlers
-  const handleAIGenerateSolution = async (sectionId: number, ex: PracticeExercise) => {
+  const handleAIGenerateSolution = async (
+    sectionId: number, 
+    ex: PracticeExercise, 
+    closeModalOnSuccess: boolean = false
+  ): Promise<PracticeExercise | null> => {
     if (!ex.questionText.trim()) {
       showAlert('تنبيه', 'يرجى كتابة نص المسألة أولاً لتوليد الحل بالذكاء الاصطناعي.');
-      return;
+      return null;
     }
     setAiLoading({ exId: ex.id, type: 'solution' });
     try {
@@ -438,17 +511,61 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
         ex.strategyText || ''
       );
       if (res && res.solutionText) {
+        const { cleanSolution, cleanStrategy } = separateStrategyAndSolution(
+          res.solutionText,
+          res.strategyText || ex.strategyText
+        );
         const updated: PracticeExercise = {
           ...ex,
-          solutionText: res.solutionText,
-          strategyText: res.strategyText || ex.strategyText
+          solutionText: cleanSolution,
+          strategyText: cleanStrategy || ex.strategyText
         };
-        await handleSaveExercise(sectionId, updated);
-        showAlert('تم التوليد بنجاح ✨', 'تم توليد الحل النموذجي بالذكاء الاصطناعي بنجاح.');
+        await handleSaveExercise(sectionId, updated, closeModalOnSuccess);
+        showAlert('تم التوليد بنجاح ✨', 'تم وضع فكرة واستراتيجية الحل في حاويتها المخصصة، والحل النموذجي في حاوية الحل بنجاح.');
+        return updated;
       }
+      return null;
     } catch (err: any) {
       console.error(err);
       showAlert('خطأ', 'فشل توليد الحل بالذكاء الاصطناعي.');
+      return null;
+    } finally {
+      setAiLoading(null);
+    }
+  };
+
+  const handleAIRegenerateStrategy = async (
+    sectionId: number,
+    ex: PracticeExercise,
+    closeModalOnSuccess: boolean = false
+  ): Promise<PracticeExercise | null> => {
+    if (!ex.questionText.trim()) {
+      showAlert('تنبيه', 'يرجى كتابة نص المسألة أولاً لصياغة فكرة واستراتيجية الحل.');
+      return null;
+    }
+    setAiLoading({ exId: ex.id, type: 'strategy' });
+    try {
+      const regenerated = await regenerateExerciseStrategyAI(
+        ex.questionText,
+        ex.solutionText || '',
+        ex.strategyText || '',
+        activeDocument?.title || 'تمرين'
+      );
+      if (regenerated) {
+        const cleaned = cleanStrategyMetaHeaders(regenerated);
+        const updated: PracticeExercise = {
+          ...ex,
+          strategyText: cleaned
+        };
+        await handleSaveExercise(sectionId, updated, closeModalOnSuccess);
+        showAlert('تمت صياغة الفكرة والاستراتيجية ✨', 'تمت إعادة صياغة فكرة واستراتيجية الحل بأسلوب تربوي بيداغوجي موجز واحترافي.');
+        return updated;
+      }
+      return null;
+    } catch (err: any) {
+      console.error(err);
+      showAlert('خطأ', 'فشلت إعادة صياغة فكرة واستراتيجية الحل بالذكاء الاصطناعي.');
+      return null;
     } finally {
       setAiLoading(null);
     }
@@ -466,11 +583,16 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
         ex.solutionText
       );
       if (shortened && shortened.trim()) {
+        const { cleanSolution, cleanStrategy } = separateStrategyAndSolution(
+          shortened.trim(),
+          ex.strategyText
+        );
         const updated: PracticeExercise = {
           ...ex,
-          solutionText: shortened.trim()
+          solutionText: cleanSolution,
+          strategyText: cleanStrategy || ex.strategyText
         };
-        await handleSaveExercise(sectionId, updated);
+        await handleSaveExercise(sectionId, updated, false);
         showAlert('تم تقليص الحل ✂️', 'تم تقليص واختصار خطوات الحل بنجاح.');
       }
     } catch (err: any) {
@@ -481,10 +603,14 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
     }
   };
 
-  const handleAIGenerateSvg = async (sectionId: number, ex: PracticeExercise) => {
+  const handleAIGenerateSvg = async (
+    sectionId: number, 
+    ex: PracticeExercise,
+    closeModalOnSuccess: boolean = false
+  ): Promise<PracticeExercise | null> => {
     if (!ex.questionText.trim()) {
       showAlert('تنبيه', 'يرجى كتابة نص المسألة أولاً لتوليد الرسم بالذكاء الاصطناعي.');
-      return;
+      return null;
     }
     setAiLoading({ exId: ex.id, type: 'svg' });
     try {
@@ -497,12 +623,15 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
           ...ex,
           svgCode: svgCode.trim()
         };
-        await handleSaveExercise(sectionId, updated);
+        await handleSaveExercise(sectionId, updated, closeModalOnSuccess);
         showAlert('تم توليد الرسم بنجاح 🎨', 'تم توليد وتطبيق رسم الـ SVG بنجاح.');
+        return updated;
       }
+      return null;
     } catch (err: any) {
       console.error(err);
       showAlert('خطأ', 'فشل توليد رسم الـ SVG.');
+      return null;
     } finally {
       setAiLoading(null);
     }
@@ -529,10 +658,14 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
                     list[i].strategyText || ''
                   );
                   if (res && res.solutionText) {
+                    const { cleanSolution, cleanStrategy } = separateStrategyAndSolution(
+                      res.solutionText,
+                      res.strategyText || list[i].strategyText
+                    );
                     list[i] = {
                       ...list[i],
-                      solutionText: res.solutionText,
-                      strategyText: res.strategyText || list[i].strategyText
+                      solutionText: cleanSolution,
+                      strategyText: cleanStrategy || list[i].strategyText
                     };
                     changed = true;
                   }
@@ -548,7 +681,7 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
           if (activeDocId) {
             await db.documents.update(activeDocId, { updatedAt: Date.now() });
           }
-          showAlert('اكتمل التوليد 🎉', 'تم توليد حلول المسائل غير المحلولة بنجاح!');
+          showAlert('اكتمل التوليد 🎉', 'تم توليد حلول المسائل غير المحلولة بنجاح مع وضع فكرة الحل في حاويتها المخصصة!');
         } finally {
           setIsSolvingAll(false);
         }
@@ -833,15 +966,29 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
         // 8. Process Unit Quiz if available
         const quizData = data.unitQuiz || data.quiz || docData?.unitQuiz;
         if (quizData && typeof quizData === 'object' && Array.isArray(quizData.questions) && quizData.questions.length > 0) {
+          const sanitizedQuestions = quizData.questions.map((q: any) => ({
+            ...q,
+            questionText: sanitizeLatexDoubleBackslashes(q.questionText || ''),
+            explanation: sanitizeLatexDoubleBackslashes(q.explanation || ''),
+            hint: sanitizeLatexDoubleBackslashes(q.hint || ''),
+            options: Array.isArray(q.options)
+              ? q.options.map((opt: any) => ({
+                  ...opt,
+                  text: sanitizeLatexDoubleBackslashes(opt.text || ''),
+                  misconceptionDiagnosis: sanitizeLatexDoubleBackslashes(opt.misconceptionDiagnosis || '')
+                }))
+              : []
+          }));
+
           await db.unitQuizzes.add({
             docId: newDocId,
             title: quizData.title || `اختبار الوحدة الشامل: ${bookletTitle}`,
             unit: quizData.unit || bookletTitle,
             grade: quizData.grade || docData?.grade || DEFAULT_METADATA.grade,
             subject: quizData.subject || docData?.subject || DEFAULT_METADATA.subject,
-            totalQuestions: typeof quizData.totalQuestions === 'number' ? quizData.totalQuestions : quizData.questions.length,
+            totalQuestions: typeof quizData.totalQuestions === 'number' ? quizData.totalQuestions : sanitizedQuestions.length,
             passingScore: typeof quizData.passingScore === 'number' ? quizData.passingScore : 70,
-            questions: quizData.questions,
+            questions: sanitizedQuestions,
             validationScore: quizData.validationScore,
             createdAt: Date.now(),
             updatedAt: Date.now()
@@ -1172,6 +1319,14 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
                 />
               </label>
               <button
+                onClick={() => setShowSupabaseConfigModal(true)}
+                className="flex items-center gap-1.5 px-3 py-2 bg-white text-slate-700 border border-slate-200 rounded-xl text-xs font-bold hover:bg-slate-50 transition-all shadow-xs cursor-pointer"
+                title="إعداد وفحص اتصال قاعدة بيانات Supabase"
+              >
+                <Settings2 size={14} className="text-violet-600" />
+                <span>إعدادات Supabase</span>
+              </button>
+              <button
                 onClick={() => setIsCreateOpen(true)}
                 className="flex items-center gap-1.5 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-xs font-black active:scale-95 transition-all shadow-xs cursor-pointer"
               >
@@ -1182,6 +1337,31 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
           }
         />
       </div>
+
+      {/* Quick Sync Notification Banner */}
+      {quickSyncResult && (
+        <div className={`p-3.5 rounded-xl border text-xs font-bold flex items-center justify-between gap-3 animate-in fade-in duration-200 no-print ${
+          quickSyncResult.success ? 'bg-emerald-50 border-emerald-300 text-emerald-950' : 'bg-rose-50 border-rose-300 text-rose-950'
+        }`}>
+          <div className="flex items-center gap-2">
+            {quickSyncResult.success ? (
+              <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
+            ) : (
+              <AlertCircle size={16} className="text-rose-600 shrink-0" />
+            )}
+            <div>
+              <span className="font-black">[{quickSyncResult.docTitle}] </span>
+              <span>{quickSyncResult.message}</span>
+            </div>
+          </div>
+          <button
+            onClick={() => setQuickSyncResult(null)}
+            className="p-1 hover:bg-slate-200/50 rounded-lg text-slate-500 cursor-pointer"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       {/* MAIN VIEW: BOOKLETS LIST vs ACTIVE BOOKLET VIEW */}
       {!activeDocId ? (
@@ -1335,10 +1515,28 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
                           <span className="text-[10px] font-black px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-100">
                             ✨ {exCount} تمرين
                           </span>
+                          <LocalDatabaseIdBadge id={doc.id} tableLabel="documents" compact={true} />
                           {doc.id && <UnitSyncIndicator docId={doc.id} compact={true} />}
                         </div>
 
                         <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleQuickSyncDoc(doc);
+                            }}
+                            disabled={syncingDocId === doc.id}
+                            className="flex items-center gap-1 px-2.5 py-1 text-violet-700 hover:text-violet-800 bg-violet-50 hover:bg-violet-100 border border-violet-200 rounded-lg text-xs font-black transition-colors cursor-pointer shadow-2xs disabled:opacity-50"
+                            title="مزامنة واعتماد هذه الكراسة والتمارين بالكامل إلى Supabase"
+                          >
+                            {syncingDocId === doc.id ? (
+                              <Loader2 size={13} className="animate-spin text-violet-600" />
+                            ) : (
+                              <UploadCloud size={13} />
+                            )}
+                            <span>{syncingDocId === doc.id ? 'جارِ المزامنة...' : 'مزامنة'}</span>
+                          </button>
                           <button
                             onClick={(e) => handleExportBookletJSON(doc, e)}
                             className="p-1.5 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors flex items-center gap-1 text-[11px] font-bold cursor-pointer"
@@ -1418,19 +1616,36 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
 
                     {/* Card Footer */}
                     <div className="pt-3.5 border-t border-gray-100 flex flex-wrap items-center justify-between gap-2">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleOpenFamiliesModal(doc);
-                        }}
-                        className="py-1.5 px-2.5 bg-indigo-50 hover:bg-indigo-600 text-indigo-700 hover:text-white font-black rounded-xl text-[11px] flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs"
-                        title="تصنيف تمارين هذه الوحدة في عائلات وتوليد محطات الحل الموجّه"
-                      >
-                        <span>🔀 تصنيف العائلات والمحطات</span>
-                      </button>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenFamiliesModal(doc);
+                          }}
+                          className="py-1.5 px-2.5 bg-indigo-50 hover:bg-indigo-600 text-indigo-700 hover:text-white font-black rounded-xl text-[11px] flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs"
+                          title="تصنيف تمارين هذه الوحدة في عائلات وتوليد محطات الحل الموجّه"
+                        >
+                          <span>🔀 تصنيف العائلات والمحطات</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setActiveDocId(doc.id!);
+                            setTimeout(() => {
+                              window.print();
+                            }, 350);
+                          }}
+                          className="py-1.5 px-2.5 bg-violet-50 hover:bg-violet-600 text-violet-700 hover:text-white font-extrabold rounded-xl text-xs flex items-center gap-1 transition-all cursor-pointer border border-violet-200 hover:border-transparent shadow-2xs"
+                          title="معاينة الطباعة / حفظ كـ PDF"
+                        >
+                          <Printer size={13} />
+                          <span>معاينة الطباعة / PDF</span>
+                        </button>
+                      </div>
                       <button 
                         onClick={() => setActiveDocId(doc.id!)}
-                        className="py-1.5 px-3 bg-violet-50 hover:bg-violet-600 text-violet-700 hover:text-white font-extrabold rounded-xl text-xs flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
+                        className="py-1.5 px-3 bg-violet-600 hover:bg-violet-700 text-white font-extrabold rounded-xl text-xs flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
                       >
                         <span>فتح وتصفح الكراسة</span>
                         <ArrowRight size={13} className="rotate-180" />
@@ -1455,6 +1670,7 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
                 <div>
                   <div className="flex items-center gap-2 flex-wrap">
                     <h4 className="text-sm font-black text-slate-900">اعتماد ونشر كراسة التمارين والمسائل سحابياً (Supabase)</h4>
+                    <LocalDatabaseIdBadge id={activeDocument.id} tableLabel="documents" compact={false} />
                     <UnitSyncIndicator key={`${activeDocument.id}-${syncRefreshKey}`} docId={activeDocument.id} compact={false} />
                   </div>
                   <p className="text-xs text-slate-600 font-medium mt-0.5">
@@ -1576,13 +1792,13 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
                 <span>تصدير JSON 💾</span>
               </button>
 
-              {/* Print */}
               <button
                 onClick={() => window.print()}
                 className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-l from-violet-600 to-indigo-600 text-white rounded-xl text-xs font-black hover:opacity-95 transition-all cursor-pointer shadow-xs"
+                title="معاينة الطباعة / حفظ كـ PDF"
               >
                 <Printer size={15} />
-                <span>طباعة / PDF 🖨️</span>
+                <span>معاينة الطباعة / حفظ كـ PDF 🖨️</span>
               </button>
             </div>
           </div>
@@ -1852,11 +2068,12 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
                                     onEdit={() => setEditingExModal({ sectionId: sec.id!, exercise: { ...ex } })}
                                     onVerify={() => setVerifyingExModal({ sectionId: sec.id!, exercise: { ...ex } })}
                                     onGenerateSolution={() => handleAIGenerateSolution(sec.id!, ex)}
+                                    onRegenerateStrategy={() => handleAIRegenerateStrategy(sec.id!, ex)}
                                     onShortenSolution={() => handleAIShortenSolution(sec.id!, ex)}
                                     onGenerateSvg={() => handleAIGenerateSvg(sec.id!, ex)}
                                     onCopy={() => handleCopyExercise(ex)}
                                     onDuplicate={() => handleDuplicateExercise(sec.id!, ex)}
-                                    onDelete={() => handleDeleteExercise(sec.id!, ex.id)}
+                                    onDelete={() => handleDeleteExercise(sec.id!, ex.id, ex.title || `التمرين ${exIdx + 1}`)}
                                   />
                                 ))}
 
@@ -2034,12 +2251,15 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
           sectionId={editingExModal.sectionId}
           exercise={editingExModal.exercise}
           onClose={() => setEditingExModal(null)}
-          onSave={(updated) => handleSaveExercise(editingExModal.sectionId, updated)}
+          onSave={(updated) => handleSaveExercise(editingExModal.sectionId, updated, true)}
           onAIGenerateSolution={async (ex) => {
-            await handleAIGenerateSolution(editingExModal.sectionId, ex);
+            return await handleAIGenerateSolution(editingExModal.sectionId, ex, false);
           }}
           onAIGenerateSvg={async (ex) => {
-            await handleAIGenerateSvg(editingExModal.sectionId, ex);
+            return await handleAIGenerateSvg(editingExModal.sectionId, ex, false);
+          }}
+          onAIGenerateStrategy={async (ex) => {
+            return await handleAIRegenerateStrategy(editingExModal.sectionId, ex, false);
           }}
           aiLoading={aiLoading?.type || null}
         />
@@ -2092,6 +2312,15 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
           dialogConfig.onConfirm?.();
         }}
         onClose={() => setDialogConfig(prev => ({ ...prev, isOpen: false }))}
+      />
+
+      {/* SUPABASE CONFIG MODAL */}
+      <SupabaseConfigModal
+        isOpen={showSupabaseConfigModal}
+        onClose={() => setShowSupabaseConfigModal(false)}
+        onSaved={() => {
+          setSyncRefreshKey(k => k + 1);
+        }}
       />
     </div>
   );

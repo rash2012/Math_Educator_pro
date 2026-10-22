@@ -1,17 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import { db, type Test, type Document } from '../db';
-import { ArrowRight, Loader2, Printer, Edit, Save, RefreshCw, Sparkles, Image as ImageIcon, Lightbulb, Settings, Plus, X, Trash, Lock, LockOpen, CheckCircle2, ClipboardCheck, BrainCircuit, Scale, BarChart3, TrendingUp, Gauge, Clock, ShieldAlert, FileSpreadsheet, BookOpen, CheckCircle, AlertTriangle, Info, ListOrdered, Cloud } from 'lucide-react';
+import { ArrowRight, Loader2, Printer, Edit, Edit3, Save, RefreshCw, Sparkles, Image as ImageIcon, Lightbulb, Settings, Plus, X, Trash, Lock, LockOpen, CheckCircle2, ClipboardCheck, BrainCircuit, Scale, BarChart3, TrendingUp, Gauge, Clock, ShieldAlert, FileSpreadsheet, BookOpen, CheckCircle, AlertTriangle, Info, ListOrdered, Cloud } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { generateAlternativeQuestion, generateSvgForTestQuestion, generateSolutionForQuestion, reviewTest, applyFixesToTest, reviewSingleQuestion } from '../services/gemini';
 import Markdown from 'react-markdown';
 import { Checkbox } from './ui/Checkbox';
 import { SyncStatusBadge } from './SyncStatusBadge';
 import { SyncControlButton } from './SyncControlButton';
-import { syncSingleTest, getSyncMapping } from '../services/supabaseSync';
+import { LocalDatabaseIdBadge } from './common/LocalDatabaseIdBadge';
+import { syncSingleTest, getSyncMapping, getQuestionFullText, cleanLeadingMarkers } from '../services/supabaseSync';
 
 import { MathRenderer } from './MathRenderer';
 import { SmartMathEditor } from './SmartMathEditor';
 import { QuestionDesignerModal } from './QuestionDesignerModal';
+import { QuestionEditModal } from './QuestionEditModal';
 
 const ARA_ORDINALS = ["الأول", "الثاني", "الثالث", "الرابع", "الخامس", "السادس", "السابع", "الثامن", "التاسع", "العاشر", "الحادي عشر", "الثاني عشر"];
 const ARA_ORDINALS_FEM = ["الأولى", "الثانية", "الثالثة", "الرابعة", "الخامسة", "السادسة", "السابعة", "الثامنة", "التاسعة", "العاشرة", "الحادية عشرة", "الثانية عشرة"];
@@ -19,15 +21,16 @@ const ARA_ORDINALS_FEM = ["الأولى", "الثانية", "الثالثة", "�
 interface TestViewProps {
   testId: number;
   onBack: () => void;
+  autoTriggerPrint?: boolean;
 }
 
-export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
+export const TestView: React.FC<TestViewProps> = ({ testId, onBack, autoTriggerPrint = false }) => {
   const [test, setTest] = useState<Test | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [showAnswers, setShowAnswers] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [generatingForBase, setGeneratingForBase] = useState<string | null>(null);
-  const [printPreview, setPrintPreview] = useState(false);
+  const [printPreview, setPrintPreview] = useState(autoTriggerPrint);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [expandedActions, setExpandedActions] = useState<string | null>(null);
   const [isDesignerModalOpen, setIsDesignerModalOpen] = useState(false);
@@ -46,6 +49,36 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
   const [printFont, setPrintFont] = useState<'default' | 'cairo' | 'amiri' | 'tajawal' | 'almarai' | 'al-mithaq'>('default');
   const [syncStatusVersion, setSyncStatusVersion] = useState(0);
   const [isSyncingSave, setIsSyncingSave] = useState(false);
+  const [editingQuestionModalData, setEditingQuestionModalData] = useState<{
+    section: any;
+    sectionIdx: number;
+    questionIdx: number;
+    question: any;
+  } | null>(null);
+
+  const handleSaveQuestionFromModal = async (updatedQ: any) => {
+    if (!test || !editingQuestionModalData) return;
+    const { sectionIdx, questionIdx } = editingQuestionModalData;
+    const newTestData = JSON.parse(JSON.stringify(test.testData));
+    if (newTestData.sections?.[sectionIdx]?.questions?.[questionIdx]) {
+      newTestData.sections[sectionIdx].questions[questionIdx] = updatedQ;
+      newTestData.title = test.title;
+      await db.tests.update(testId, { testData: newTestData, updatedAt: Date.now() });
+      setTest({ ...test, testData: newTestData });
+      setHasUnsavedChanges(false);
+    }
+  };
+
+  // Auto trigger print preview if requested
+  useEffect(() => {
+    if (autoTriggerPrint && test && !loading) {
+      setPrintPreview(true);
+      const timer = setTimeout(() => {
+        window.print();
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [autoTriggerPrint, test, loading]);
 
   useEffect(() => {
     const loadTest = async () => {
@@ -54,7 +87,7 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
       setLoading(false);
     };
     loadTest();
-  }, [testId, showAnswers, syncStatusVersion]);
+  }, [testId, syncStatusVersion]);
 
   const getRelatedPdfContent = async () => {
     if (!test) return "";
@@ -119,6 +152,53 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
     }
   };
 
+  const handleFixTest = () => {
+    if (!test || !test.testData) return;
+    const newTestData = { ...test.testData };
+    const araNumbers = ['الأول', 'الثاني', 'الثالث', 'الرابع', 'الخامس', 'السادس', 'السابع', 'الثامن', 'التاسع', 'العاشر'];
+
+    newTestData.sections.forEach((section: any, sIdx: number) => {
+        const category = getSectionCategory(section, sIdx);
+        
+        section.questions.forEach((q: any, qIdx: number) => {
+            // أولاً: للأسئلة غير الموضوعية (المقالية)، ندمج الفرضية والطلبات كاملة في حقل text ونفرغ subQuestions
+            if (category !== 'mcq') {
+                const unified = getQuestionFullText(q);
+                if (unified) {
+                    q.text = unified;
+                    delete q.subQuestions;
+                    delete q.subParts;
+                }
+            }
+
+            let marker = '';
+            if (category === 'mcq') {
+                const ordinals = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'];
+                marker = `${ordinals[qIdx] || ''} `;
+            } else if (category === 'questions') {
+                marker = `*السؤال ${araNumbers[qIdx] || ''} -* `;
+            } else if (category === 'exercises') {
+                marker = `*التمرين ${araNumbers[qIdx] || ''} -* `;
+            } else if (category === 'problems') {
+                marker = `*المسألة ${araNumbers[qIdx] || ''} -* `;
+            }
+
+            if (marker) {
+                // Check if marker is already there to avoid duplicates
+                const cleanMarker = marker.replace(/\*/g, '').trim();
+                const textWithoutAsterisks = (q.text || '').replace(/\*/g, '');
+                if (!textWithoutAsterisks.includes(cleanMarker)) { 
+                    q.text = marker + (q.text || '');
+                }
+            }
+        });
+    });
+    setTest({ ...test, testData: newTestData });
+    setHasUnsavedChanges(true);
+    alert('تم إصلاح وتوحيد تنسيق الأسئلة والطلبات بنجاح');
+  };
+
+
   const handleGenerateSvgTest = async (sectionIdx: number, questionIdx: number) => {
     if (!test || !test.testData) return;
     setGeneratingForBase(`svg-${sectionIdx}-${questionIdx}`);
@@ -162,9 +242,7 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
         if (result.hasError && result.correctedQuestion) {
             if (result.correctedQuestion.text) {
                 newTestData.sections[sectionIdx].questions[questionIdx].text = result.correctedQuestion.text;
-            }
-            if (result.correctedQuestion.subQuestions && newTestData.sections[sectionIdx].questions[questionIdx].subQuestions) {
-                newTestData.sections[sectionIdx].questions[questionIdx].subQuestions = result.correctedQuestion.subQuestions;
+                delete newTestData.sections[sectionIdx].questions[questionIdx].subQuestions;
             }
         }
         newTestData.sections[sectionIdx].questions[questionIdx].solution = result.solution;
@@ -192,8 +270,13 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
 
   const data = test.testData;
 
-  const handlePrint = () => {
+  const handlePrint = (immediatePrint: boolean = true) => {
       setPrintPreview(true);
+      if (immediatePrint) {
+        setTimeout(() => {
+          window.print();
+        }, 200);
+      }
   };
 
   const handleNativePrint = () => {
@@ -214,7 +297,27 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
 
   const handleSaveChanges = async (andSync: boolean = false) => {
       if (!test) return;
-      await db.tests.update(testId, { testData: test.testData, title: test.title, isReviewed: test.isReviewed });
+      const sanitizedTestData = { ...test.testData };
+      sanitizedTestData.title = test.title;
+      if (Array.isArray(sanitizedTestData.sections)) {
+        sanitizedTestData.sections.forEach((sec: any) => {
+          if (Array.isArray(sec.questions)) {
+            sec.questions.forEach((q: any) => {
+              if (sec.sectionType !== 'mcq') {
+                const full = getQuestionFullText(q);
+                if (full) {
+                  q.text = full;
+                  delete q.subQuestions;
+                  delete q.subParts;
+                }
+              }
+            });
+          }
+        });
+      }
+
+      await db.tests.update(testId, { testData: sanitizedTestData, title: test.title, isReviewed: test.isReviewed });
+      setTest({ ...test, testData: sanitizedTestData });
       setHasUnsavedChanges(false);
       setIsEditing(false);
 
@@ -285,18 +388,36 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
     try {
       const updatedTestData = await applyFixesToTest(test.testData, selectedIssues);
       
-      // Update local state
-      setTest({ ...test, testData: updatedTestData });
-      setHasUnsavedChanges(true);
+      if (!updatedTestData || !Array.isArray(updatedTestData.sections) || updatedTestData.sections.length === 0) {
+        throw new Error("تعذر استخراج بنية الأقسام الصالحة بعد الإصلاح.");
+      }
+
+      const remainingIssues = test.reviewIssues.filter(i => !selectedIssueIds.includes(i.id));
+
+      // 1. Persist directly to local Dexie IndexedDB
+      await db.tests.update(test.id, {
+        testData: updatedTestData,
+        reviewIssues: remainingIssues,
+        updatedAt: Date.now()
+      });
+
+      // 2. Update local state
+      setTest({
+        ...test,
+        testData: updatedTestData,
+        reviewIssues: remainingIssues
+      });
+      setHasUnsavedChanges(false);
       
-      // Clear selection after fix
+      // 3. Clear selection and close report
       setSelectedIssueIds([]);
       setShowReport(false);
+      setSyncStatusVersion(v => v + 1);
       
-      alert("تم تطبيق الإصلاحات بنجاح. يرجى مراجعة التغييرات وحفظ الاختبار.");
-    } catch (error) {
-      console.error(error);
-      alert("فشل في تطبيق الإصلاحات.");
+      alert(`✅ تم تطبيق ${selectedIssues.length} من الإصلاحات بنجاح وحفظها تلقائياً في الاختبار!`);
+    } catch (error: any) {
+      console.error("Apply fixes failed:", error);
+      alert(`فشل في تطبيق الإصلاحات: ${error?.message || "يرجى المحاولة مرة أخرى."}`);
     } finally {
       setFixing(false);
     }
@@ -399,7 +520,7 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
           const sectionType = newTestData.sections[sectionIdx].sectionType;
           const newQuestion = sectionType === 'mcq' 
               ? { text: "سؤال جديد", options: ["خيار A", "خيار B", "خيار C", "خيار D"], correctOptionIndex: Math.floor(Math.random() * 4), solution: "الحل", points: 1 }
-              : { text: "سؤال جديد", subQuestions: ["طلب 1", "طلب 2"], solution: "الحل", points: 1 };
+              : { text: "نص المسألة أو الفرضية...\n1) الطلب الأول\n2) الطلب الثاني", solution: "الحل", points: 1 };
           
           newTestData.sections[sectionIdx].questions.splice(questionIdx + 1, 0, newQuestion);
           return { ...prev, testData: newTestData };
@@ -425,20 +546,172 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
       });
   };
 
-  const getQuestionTitleNode = (sectionType: string, qIdx: number, isEdit: boolean) => {
-      let title: string | number = qIdx + 1;
-      if (sectionType === 'questions') {
-          title = `السؤال ${ARA_ORDINALS[qIdx] || (qIdx + 1)} :`;
-      } else if (sectionType === 'exercises') {
-          title = `التمرين ${ARA_ORDINALS[qIdx] || (qIdx + 1)} :`;
-      } else if (sectionType === 'problems') {
-          title = `المسألة ${ARA_ORDINALS_FEM[qIdx] || (qIdx + 1)} :`;
+interface ParsedRequest {
+  num: number;
+  text: string;
+  subParts: Array<{
+    letter: string;
+    text: string;
+  }>;
+}
+
+interface ParsedQuestion {
+  intro: string;
+  requests: ParsedRequest[];
+}
+
+const parseQuestionContent = (q: any): ParsedQuestion => {
+  if (!q) return { intro: '', requests: [] };
+
+  const fullText = getQuestionFullText(q);
+  if (!fullText) return { intro: '', requests: [] };
+
+  const lines = fullText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+  const reqLineRegex = /^(?:([1-9][0-9]?|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫])[\.\-\)\:]|[\(\[]([1-9][0-9]?|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫])[\)\]]|(?:الطلب|السؤال|التمرين|المسألة)\s*(الأول|الثاني|الثالث|الرابع|الخامس|السادس)[\:\.]?)\s*(.*)$/;
+  const subPartRegex = /^(?:-|\*|\+)?\s*(?:([a-zA-Z]|[أ-ي]|[\u0600-\u06FF])[\.\-\)\:]|[\(\[]([a-zA-Z]|[أ-ي]|[\u0600-\u06FF])[\)\]])\s*(.*)$/;
+
+  const arabicOrdinalsToNum: Record<string, number> = {
+    'الأول': 1, 'الثاني': 2, 'الثالث': 3, 'الرابع': 4, 'الخامس': 5, 'السادس': 6
+  };
+  const circledToNum: Record<string, number> = {
+    '①': 1, '②': 2, '③': 3, '④': 4, '⑤': 5, '⑥': 6, '⑦': 7, '⑧': 8, '⑨': 9, '⑩': 10, '⑪': 11, '⑫': 12
+  };
+  const arabicLetterToEng: Record<string, string> = {
+    'أ': 'a', 'ا': 'a', 'إ': 'a', 'آ': 'a',
+    'ب': 'b',
+    'ج': 'c',
+    'د': 'd',
+    'هـ': 'e', 'ه': 'e',
+    'و': 'f',
+    'ز': 'g',
+    'ح': 'h',
+    'ط': 'i',
+    'ي': 'j'
+  };
+
+  const introLines: string[] = [];
+  const requests: ParsedRequest[] = [];
+  let currentReq: ParsedRequest | null = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const reqMatch = line.match(reqLineRegex);
+
+    if (reqMatch) {
+      const rawNum = reqMatch[1] || reqMatch[2];
+      const ordWord = reqMatch[3];
+      const content = (reqMatch[4] || '').trim();
+
+      let num = requests.length + 1;
+      if (rawNum) {
+        if (circledToNum[rawNum]) num = circledToNum[rawNum];
+        else {
+          const parsedInt = parseInt(rawNum, 10);
+          if (!isNaN(parsedInt)) num = parsedInt;
+        }
+      } else if (ordWord && arabicOrdinalsToNum[ordWord]) {
+        num = arabicOrdinalsToNum[ordWord];
       }
 
-      if (typeof title === 'number' || sectionType === 'mcq') {
-          return <span className={`flex items-center justify-center w-6 h-6 rounded-full border border-black text-black shrink-0 text-sm ${isEdit ? 'mt-2' : ''}`}>{qIdx + 1}</span>;
+      currentReq = {
+        num,
+        text: content,
+        subParts: []
+      };
+      requests.push(currentReq);
+      continue;
+    }
+
+    if (currentReq) {
+      const subMatch = line.match(subPartRegex);
+      if (subMatch) {
+        const rawLetter = (subMatch[1] || subMatch[2] || '').toLowerCase();
+        const content = (subMatch[3] || '').trim();
+        const letter = arabicLetterToEng[rawLetter] || (rawLetter.length === 1 && /[a-z]/i.test(rawLetter) ? rawLetter.toLowerCase() : String.fromCharCode(97 + currentReq.subParts.length));
+        currentReq.subParts.push({ letter, text: content });
+      } else {
+        if (currentReq.subParts.length > 0) {
+          currentReq.subParts[currentReq.subParts.length - 1].text += ' ' + line;
+        } else {
+          currentReq.text += (currentReq.text ? ' ' : '') + line;
+        }
       }
-      return <span className={`font-bold shrink-0 text-black whitespace-nowrap ${isEdit ? 'mt-2' : ''}`}>{title}</span>;
+    } else {
+      introLines.push(line);
+    }
+  }
+
+  // If no numbered lines were detected at all, treat full text as intro
+  if (requests.length === 0) {
+    return {
+      intro: fullText,
+      requests: []
+    };
+  }
+
+  return {
+    intro: introLines.join('\n'),
+    requests
+  };
+};
+
+  const getSectionCategory = (section: any, sIdx: number): 'mcq' | 'questions' | 'exercises' | 'problems' => {
+    const type = String(section?.sectionType || '').toLowerCase();
+    const title = String(section?.title || '').trim();
+
+    if (type === 'mcq' || title.includes('اختيار') || (sIdx === 0 && !type)) {
+      if (type !== 'questions' && type !== 'exercises' && type !== 'problems') {
+        return 'mcq';
+      }
+    }
+
+    if (type === 'problems' || title.includes('مسائل') || title.includes('المسائل') || title.includes('المسألة') || title.includes('رابعاً') || sIdx === 3) {
+      return 'problems';
+    }
+
+    if (type === 'exercises' || title.includes('تمارين') || title.includes('التمارين') || title.includes('التمرين') || title.includes('ثالثاً') || sIdx === 2) {
+      return 'exercises';
+    }
+
+    if (type === 'questions' || title.includes('أسئلة') || title.includes('الأسئلة') || title.includes('السؤال') || title.includes('ثانياً') || sIdx === 1) {
+      return 'questions';
+    }
+
+    if (title.includes('مسأل') || title.includes('مساله')) return 'problems';
+    if (title.includes('تمرين')) return 'exercises';
+    if (title.includes('سؤال') || title.includes('اسئل')) return 'questions';
+
+    return sIdx === 1 ? 'questions' : sIdx === 2 ? 'exercises' : sIdx === 3 ? 'problems' : 'questions';
+  };
+
+  const getQuestionTitleNode = (section: any, sIdx: number, qIdx: number, isEdit: boolean) => {
+      const category = getSectionCategory(section, sIdx);
+
+      if (category === 'mcq') {
+          return (
+              <span className={`flex items-center justify-center w-6 h-6 rounded-full border border-black text-black shrink-0 text-sm font-bold select-none ${isEdit ? 'mt-2' : ''}`}>
+                  {qIdx + 1}
+              </span>
+          );
+      }
+
+      let title = '';
+      if (category === 'questions') {
+          title = `السؤال ${ARA_ORDINALS[qIdx] || (qIdx + 1)} :`;
+      } else if (category === 'exercises') {
+          title = `التمرين ${ARA_ORDINALS[qIdx] || (qIdx + 1)} :`;
+      } else if (category === 'problems') {
+          title = `المسألة ${ARA_ORDINALS_FEM[qIdx] || (qIdx + 1)} :`;
+      } else {
+          title = `السؤال ${ARA_ORDINALS[qIdx] || (qIdx + 1)} :`;
+      }
+
+      return (
+          <span className={`font-bold shrink-0 text-black text-base whitespace-nowrap select-none ${isEdit ? 'mt-2' : ''}`}>
+              {title}
+          </span>
+      );
   };
 
   return (
@@ -469,6 +742,7 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
                 ) : (
                   <div className="flex flex-wrap items-center gap-2.5">
                     <h1 className="text-3xl font-bold text-gray-900">{test.title}</h1>
+                    <LocalDatabaseIdBadge id={test.id} tableLabel="tests" compact={false} />
                     {test.isReviewed && (
                       <div className="flex items-center gap-1 text-xs bg-emerald-600 text-white px-3 py-1 rounded-full font-black shadow-sm">
                         <CheckCircle2 size={14} />
@@ -508,6 +782,12 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
                       >
                           <Save size={18} />
                           حفظ محلي فقط
+                      </button>
+                      <button
+                          onClick={handleFixTest}
+                          className="px-4 py-2 bg-purple-600 text-white font-bold rounded-lg hover:bg-purple-700 transition-colors flex items-center gap-2"
+                      >
+                          إصلاح الاختبار
                       </button>
                       <button
                           onClick={() => setIsDesignerModalOpen(true)}
@@ -571,7 +851,12 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
               </button>
               {test.reviewReport && (
                 <button
-                    onClick={() => setShowReport(true)}
+                    onClick={() => {
+                      if (test.reviewIssues && test.reviewIssues.length > 0 && selectedIssueIds.length === 0) {
+                        setSelectedIssueIds(test.reviewIssues.map(i => i.id));
+                      }
+                      setShowReport(true);
+                    }}
                     className="px-4 py-2 bg-amber-600 text-white font-bold rounded-lg hover:bg-amber-700 transition-colors"
                 >
                     عرض التقرير
@@ -584,11 +869,12 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
                   {showAnswers ? 'إخفاء سلالم الحل' : 'إظهار سلالم الحل'}
               </button>
               <button
-                  onClick={handlePrint}
-                  className="px-4 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-2"
+                  onClick={() => handlePrint(true)}
+                  className="px-4 py-2 bg-indigo-600 text-white font-black rounded-xl hover:bg-indigo-700 transition-all flex items-center gap-2 shadow-md cursor-pointer"
+                  title="معاينة الطباعة وحفظ كـ PDF"
               >
-                  <Printer size={20} />
-                  طباعة A4
+                  <Printer size={18} />
+                  معاينة الطباعة / حفظ كـ PDF 🖨️
               </button>
           </div>
         </div>
@@ -664,10 +950,10 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
                     </button>
                     <button
                         onClick={handleNativePrint}
-                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-xl flex items-center gap-2 text-xs shadow-md transition-all scale-100 active:scale-95"
+                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-xl flex items-center gap-2 text-xs shadow-md transition-all scale-100 active:scale-95 cursor-pointer"
                     >
                         <Printer size={16} />
-                        طباعة الآن
+                        معاينة الطباعة / حفظ كـ PDF 🖨️
                     </button>
                 </div>
             </div>
@@ -817,281 +1103,365 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
         <div className="print-table-body w-full">
             {data.sections?.map((section: any, sIdx: number) => {
                 if (!section.questions || section.questions.length === 0) return null;
+                const isMcq = getSectionCategory(section, sIdx) === 'mcq';
                 return (
                     <div key={sIdx} className="mb-8 print:mb-4">
                         <h2 className="text-xl font-bold bg-gray-100 p-2 rounded mb-4 print:mb-2 print:bg-transparent print:border-b print:border-black">{section.title}</h2>
                     <div className="space-y-6 print:space-y-1">
                         {section.questions.map((q: any, qIdx: number) => (
                             <div key={qIdx} className={`mr-0 group relative border border-transparent hover:border-gray-200 p-2 print:p-1 rounded-lg transition-colors ${showAnswers ? 'print:break-inside-auto' : 'print:break-inside-avoid'}`}>
-                                {isEditing && (
-                                <div className="absolute top-2 left-2 z-10 print:hidden flex items-start flex-col sm:flex-row-reverse gap-2">
-                                    {expandedActions === `${sIdx}-${qIdx}` ? (
-                                        <div className="flex flex-wrap bg-white shadow-lg border border-gray-200 rounded-lg p-1 gap-1 items-center justify-end animate-in fade-in zoom-in duration-200">
+                                <div className="absolute top-2.5 left-2.5 z-10 print:hidden flex items-center gap-1.5">
+                                    <button 
+                                        type="button"
+                                        onClick={() => setEditingQuestionModalData({ section, sectionIdx: sIdx, questionIdx: qIdx, question: q })}
+                                        className="px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 hover:text-indigo-800 rounded-xl shadow-2xs hover:shadow-xs flex items-center justify-center gap-1.5 font-bold text-xs transition-all border border-indigo-200/90 group"
+                                        title="تعديل هذا السؤال في نافذة المحاكاة المباشرة"
+                                    >
+                                        <Edit3 size={14} className="text-indigo-600 group-hover:scale-110 transition-transform" />
+                                        <span>تعديل</span>
+                                    </button>
+                                    {isEditing && (
+                                        expandedActions === `${sIdx}-${qIdx}` ? (
+                                            <div className="flex flex-wrap bg-white shadow-lg border border-gray-200 rounded-lg p-1 gap-1 items-center justify-end animate-in fade-in zoom-in duration-200">
+                                                <button 
+                                                    onClick={() => setExpandedActions(null)}
+                                                    className="p-1.5 hover:bg-gray-100 text-gray-500 rounded-full"
+                                                    title="إغلاق"
+                                                >
+                                                    <X size={16} />
+                                                </button>
+                                                <div className="w-px h-6 bg-gray-200 mx-1 hidden sm:block"></div>
+                                                <button 
+                                                    onClick={() => handleAddQuestion(sIdx, qIdx)}
+                                                    className="px-2 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-md shadow-sm flex items-center justify-center gap-1 font-bold text-xs"
+                                                    title="إضافة سؤال بعد هذا"
+                                                >
+                                                    <Plus size={14} /> إضافة
+                                                </button>
+                                                <button 
+                                                    onClick={() => handleRemoveQuestion(sIdx, qIdx)}
+                                                    className="px-2 py-1.5 bg-red-50 hover:bg-red-100 text-red-700 rounded-md shadow-sm flex items-center justify-center gap-1 font-bold text-xs"
+                                                    title="حذف هذا السؤال"
+                                                >
+                                                    <Trash size={14} /> حذف
+                                                </button>
+                                                <button 
+                                                    onClick={() => handleRegenerateQuestion(sIdx, qIdx)}
+                                                    disabled={generatingForBase === `${sIdx}-${qIdx}`}
+                                                    className="px-2 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-md shadow-sm flex items-center justify-center gap-1 font-bold text-xs"
+                                                    title="اقتراح سؤال بديل"
+                                                >
+                                                    {generatingForBase === `${sIdx}-${qIdx}` ? (
+                                                        <Loader2 size={14} className="animate-spin" />
+                                                    ) : (
+                                                        <RefreshCw size={14} />
+                                                    )}
+                                                    تبديل
+                                                </button>
+                                                <button 
+                                                    onClick={() => handleGenerateSvgTest(sIdx, qIdx)}
+                                                    disabled={generatingForBase === `svg-${sIdx}-${qIdx}`}
+                                                    className="px-2 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-md shadow-sm flex items-center justify-center gap-1 font-bold text-xs"
+                                                    title="إنشاء أو تحديث رسم توضيحي"
+                                                >
+                                                    {generatingForBase === `svg-${sIdx}-${qIdx}` ? (
+                                                        <Loader2 size={14} className="animate-spin" />
+                                                    ) : (
+                                                        <ImageIcon size={14} />
+                                                    )}
+                                                    رسم
+                                                </button>
+                                                <button 
+                                                    onClick={() => handleReviewSingleQuestion(sIdx, qIdx)}
+                                                    disabled={reviewingQuestionKey === `${sIdx}-${qIdx}`}
+                                                    className="px-2 py-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 rounded-md shadow-sm flex items-center justify-center gap-1 font-bold text-xs"
+                                                    title="مراجعة علمية وحسابية ذكية للسؤال"
+                                                >
+                                                    {reviewingQuestionKey === `${sIdx}-${qIdx}` ? (
+                                                        <Loader2 size={14} className="animate-spin" />
+                                                    ) : (
+                                                        <CheckCircle2 size={14} />
+                                                    )}
+                                                    مراجعة
+                                                </button>
+                                                <button 
+                                                    onClick={() => handleGenerateSolutionTest(sIdx, qIdx)}
+                                                    disabled={generatingForBase === `sol-${sIdx}-${qIdx}`}
+                                                    className="px-2 py-1.5 bg-yellow-50 hover:bg-yellow-100 text-yellow-700 rounded-md shadow-sm flex items-center justify-center gap-1 font-bold text-xs"
+                                                    title="حل تفصيلي مقترح وتصحيح"
+                                                >
+                                                    {generatingForBase === `sol-${sIdx}-${qIdx}` ? (
+                                                        <Loader2 size={14} className="animate-spin" />
+                                                    ) : (
+                                                        <Lightbulb size={14} />
+                                                    )}
+                                                    حل وتصحيح
+                                                </button>
+                                            </div>
+                                        ) : (
                                             <button 
-                                                onClick={() => setExpandedActions(null)}
-                                                className="p-1.5 hover:bg-gray-100 text-gray-500 rounded-full"
-                                                title="إغلاق"
+                                                onClick={() => setExpandedActions(`${sIdx}-${qIdx}`)}
+                                                className="p-1.5 bg-gray-50 border border-gray-200 hover:bg-gray-100 text-gray-700 rounded-xl shadow-2xs flex items-center justify-center gap-1 font-bold text-xs transition-colors"
+                                                title="أدوات السؤال الإضافية"
                                             >
-                                                <X size={16} />
+                                                <Settings size={14} />
                                             </button>
-                                            <div className="w-px h-6 bg-gray-200 mx-1 hidden sm:block"></div>
-                                            <button 
-                                                onClick={() => handleAddQuestion(sIdx, qIdx)}
-                                                className="px-2 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-md shadow-sm flex items-center justify-center gap-1 font-bold text-xs"
-                                                title="إضافة سؤال بعد هذا"
-                                            >
-                                                <Plus size={14} /> إضافة
-                                            </button>
-                                            <button 
-                                                onClick={() => handleRemoveQuestion(sIdx, qIdx)}
-                                                className="px-2 py-1.5 bg-red-50 hover:bg-red-100 text-red-700 rounded-md shadow-sm flex items-center justify-center gap-1 font-bold text-xs"
-                                                title="حذف هذا السؤال"
-                                            >
-                                                <Trash size={14} /> حذف
-                                            </button>
-                                            <button 
-                                                onClick={() => handleRegenerateQuestion(sIdx, qIdx)}
-                                                disabled={generatingForBase === `${sIdx}-${qIdx}`}
-                                                className="px-2 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-md shadow-sm flex items-center justify-center gap-1 font-bold text-xs"
-                                                title="اقتراح سؤال بديل"
-                                            >
-                                                {generatingForBase === `${sIdx}-${qIdx}` ? (
-                                                    <Loader2 size={14} className="animate-spin" />
-                                                ) : (
-                                                    <RefreshCw size={14} />
-                                                )}
-                                                تبديل
-                                            </button>
-                                            <button 
-                                                onClick={() => handleGenerateSvgTest(sIdx, qIdx)}
-                                                disabled={generatingForBase === `svg-${sIdx}-${qIdx}`}
-                                                className="px-2 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-md shadow-sm flex items-center justify-center gap-1 font-bold text-xs"
-                                                title="إنشاء أو تحديث رسم توضيحي"
-                                            >
-                                                {generatingForBase === `svg-${sIdx}-${qIdx}` ? (
-                                                    <Loader2 size={14} className="animate-spin" />
-                                                ) : (
-                                                    <ImageIcon size={14} />
-                                                )}
-                                                رسم
-                                            </button>
-                                            <button 
-                                                onClick={() => handleReviewSingleQuestion(sIdx, qIdx)}
-                                                disabled={reviewingQuestionKey === `${sIdx}-${qIdx}`}
-                                                className="px-2 py-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 rounded-md shadow-sm flex items-center justify-center gap-1 font-bold text-xs"
-                                                title="مراجعة علمية وحسابية ذكية للسؤال"
-                                            >
-                                                {reviewingQuestionKey === `${sIdx}-${qIdx}` ? (
-                                                    <Loader2 size={14} className="animate-spin" />
-                                                ) : (
-                                                    <CheckCircle2 size={14} />
-                                                )}
-                                                مراجعة
-                                            </button>
-                                            <button 
-                                                onClick={() => handleGenerateSolutionTest(sIdx, qIdx)}
-                                                disabled={generatingForBase === `sol-${sIdx}-${qIdx}`}
-                                                className="px-2 py-1.5 bg-yellow-50 hover:bg-yellow-100 text-yellow-700 rounded-md shadow-sm flex items-center justify-center gap-1 font-bold text-xs"
-                                                title="حل تفصيلي مقترح وتصحيح"
-                                            >
-                                                {generatingForBase === `sol-${sIdx}-${qIdx}` ? (
-                                                    <Loader2 size={14} className="animate-spin" />
-                                                ) : (
-                                                    <Lightbulb size={14} />
-                                                )}
-                                                حل وتصحيح
-                                            </button>
-                                        </div>
-                                    ) : (
-                                        <button 
-                                            onClick={() => setExpandedActions(`${sIdx}-${qIdx}`)}
-                                            className="p-2 bg-gray-50 border border-gray-200 hover:bg-gray-100 text-gray-700 rounded-full shadow-sm flex items-center justify-center gap-1 font-bold text-xs transition-colors"
-                                            title="أدوات السؤال"
-                                        >
-                                            <Settings size={16} /> تحرير
-                                        </button>
+                                        )
                                     )}
                                 </div>
-                            )}
-                            
-                            <div className="flex flex-col print:flex-row md:flex-row gap-4 print:gap-2 w-full items-start">
-                                {/* Right side: Question Subject and Sub-questions */}
-                                <div className="flex-1 min-w-0 w-full print:flex-1">
-                                    {isEditing ? (
-                                        <div className="flex flex-col gap-2 mb-2 w-full">
-                                            <div className="flex gap-2 font-bold break-inside-avoid w-full">
-                                                {getQuestionTitleNode(section.sectionType, qIdx, true)}
-                                                <SmartMathEditor 
-                                                    className="flex-1"
-                                                    value={q.text}
-                                                    onChange={(val) => updateQuestionData(sIdx, qIdx, (t) => t.text = val)}
-                                                    placeholder="نص السؤال..."
-                                                />
+                                
+                                {isMcq ? (
+                                    <div className="w-full">
+                                        {isEditing ? (
+                                            <div className="flex flex-col gap-2 mb-2 w-full">
+                                                <div className="flex gap-2 font-bold break-inside-avoid w-full">
+                                                    {getQuestionTitleNode(section, sIdx, qIdx, true)}
+                                                    <SmartMathEditor 
+                                                        className="flex-1"
+                                                        value={q.text}
+                                                        onChange={(val) => updateQuestionData(sIdx, qIdx, (t) => t.text = val)}
+                                                        placeholder="نص السؤال..."
+                                                    />
+                                                </div>
+                                                <div className="flex flex-col w-full text-right mt-2">
+                                                    <label className="text-xs text-gray-500 mb-1 font-bold">كود SVG للرسم (اختياري)</label>
+                                                    <textarea
+                                                        dir="ltr"
+                                                        className="w-full p-2 border border-emerald-300 rounded bg-emerald-50 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[60px] text-left text-xs font-mono whitespace-pre"
+                                                        value={q.svgCode || ''}
+                                                        onChange={(e) => updateQuestionData(sIdx, qIdx, (t) => t.svgCode = e.target.value)}
+                                                        placeholder="<svg>...</svg>"
+                                                    />
+                                                </div>
                                             </div>
-                                            <div className="flex flex-col w-full text-right mt-2">
-                                                <label className="text-xs text-gray-500 mb-1 font-bold">كود SVG للرسم (اختياري)</label>
+                                        ) : (
+                                            <div className="w-full space-y-2">
+                                                <div className="flex items-center justify-between pb-1.5 border-b border-gray-100/80">
+                                                    <div className="flex items-center gap-2">
+                                                        {getQuestionTitleNode(section, sIdx, qIdx, false)}
+                                                        {q.points && (
+                                                            <span className="text-xs font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">
+                                                                ({q.points} درجة)
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                {(() => {
+                                                    const mcqFullContent = (q.svgCode && !q.text?.includes('<svg'))
+                                                        ? `${q.svgCode}\n${q.text || ''}`
+                                                        : (q.text || '');
+                                                    return (
+                                                        <div className="w-full text-gray-900 leading-relaxed font-bold">
+                                                            <MathRenderer className="w-full [&_p]:mb-2 [&_p]:last:mb-0" content={mcqFullContent} />
+                                                        </div>
+                                                    );
+                                                })()}
+                                            </div>
+                                        )}
+                                        
+                                        {/* MCQ Options with clear-both */}
+                                        {q.options && (
+                                            <div className="w-full mt-3 mb-2 break-inside-avoid clear-both">
+                                                <table className="w-full border-collapse border border-gray-300 print:border-black text-center" dir="rtl">
+                                                    <tbody>
+                                                        <tr>
+                                                            {Array.from({ length: 4 }).map((_, oIdx) => {
+                                                                const label = String.fromCharCode(65 + oIdx);
+                                                                const opt = q.options && q.options[oIdx] !== undefined ? q.options[oIdx] : '';
+                                                                return (
+                                                                    <React.Fragment key={oIdx}>
+                                                                        <td 
+                                                                            className="border border-gray-300 print:border-black p-1.5 print:p-1 font-bold align-middle text-center bg-gray-100 print:bg-gray-100 w-[5%] whitespace-nowrap"
+                                                                            style={{ backgroundColor: '#eaeaea' }}
+                                                                        >
+                                                                            {label}
+                                                                        </td>
+                                                                        <td className="border border-gray-300 print:border-black p-1.5 print:p-1 align-middle text-center w-[20%]">
+                                                                            <div className="flex flex-col items-center justify-center gap-2 min-h-fit overflow-visible">
+                                                                                {isEditing ? (
+                                                                                    <SmartMathEditor 
+                                                                                        className="w-full"
+                                                                                        value={opt}
+                                                                                        onChange={(val) => updateQuestionData(sIdx, qIdx, (t) => {
+                                                                                            if (!t.options) t.options = ['', '', '', ''];
+                                                                                            t.options[oIdx] = val;
+                                                                                        })}
+                                                                                        placeholder={`الخيار ${label}...`}
+                                                                                    />
+                                                                                ) : (
+                                                                                    <MathRenderer className="flex-1 break-words whitespace-normal text-center w-full overflow-visible" content={opt} />
+                                                                                )}
+                                                                            </div>
+                                                                        </td>
+                                                                    </React.Fragment>
+                                                                );
+                                                            })}
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        )}
+                                    </div>
+                                ) : (
+                                    /* Non-MCQ: ثانياً وثالثاً ورابعاً - Unified Single Container & Single Block for Question Text and Requests */
+                                    <div className={`w-full rounded-2xl border transition-all ${
+                                        isEditing 
+                                            ? 'bg-slate-50/70 border-indigo-200 p-4' 
+                                            : 'bg-white border-gray-200/90 shadow-2xs hover:border-indigo-100 p-4 md:p-5'
+                                    } print:bg-transparent print:border print:border-black print:rounded-lg print:p-3 print:mb-3 print:shadow-none print:break-inside-avoid mb-4`}>
+                                        {isEditing ? (
+                                            <div className="flex flex-col gap-3 w-full">
+                                                {/* Single Block Editor */}
+                                                <div className="flex flex-col md:flex-row gap-3 items-start w-full">
+                                                    <div className="shrink-0">
+                                                        {getQuestionTitleNode(section, sIdx, qIdx, true)}
+                                                    </div>
+                                                    <div className="flex-1 w-full min-w-0 flex flex-col gap-2">
+                                                        <SmartMathEditor 
+                                                            className="w-full min-h-[110px]"
+                                                            value={getQuestionFullText(q)}
+                                                            onChange={(val) => {
+                                                                updateQuestionData(sIdx, qIdx, (t) => {
+                                                                    t.text = val;
+                                                                    delete t.subQuestions;
+                                                                });
+                            }}
+                                                            placeholder="اكتب نص السؤال والطلبات كاملة في كتلة واحدة (مثال: نص السؤال \n 1) الطلب الأول \n    a) الطلب الفرعي \n 2) الطلب الثاني)..."
+                                                        />
+                                                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 bg-slate-100/90 px-3 py-1.5 rounded-xl border border-slate-200">
+                                                            <span>💡 النص والطلبات في كتلة واحدة: ابدأ السطر بـ 1) أو 2) للطلبات، و a) أو b) للطلبات الفرعية.</span>
+                                                            <div className="flex items-center gap-1.5">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        const currentVal = getQuestionFullText(q);
+                                                                        const currParsed = parseQuestionContent({ text: currentVal });
+                                                                        const nextNum = currParsed.requests.length + 1;
+                                                                        const newVal = currentVal + (currentVal.endsWith('\n') || !currentVal ? '' : '\n') + `${nextNum}) `;
+                                                                        updateQuestionData(sIdx, qIdx, (t) => { t.text = newVal; });
+                                                                    }}
+                                                                    className="px-2.5 py-1 bg-white hover:bg-slate-200 text-slate-700 font-bold border border-slate-300 rounded-lg text-xs transition-colors"
+                                                                >
+                                                                    + سطر طلب (1, 2)
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        const currentVal = getQuestionFullText(q);
+                                                                        const currParsed = parseQuestionContent({ text: currentVal });
+                                                                        const lastReq = currParsed.requests[currParsed.requests.length - 1];
+                                                                        const nextLetter = lastReq ? String.fromCharCode(97 + lastReq.subParts.length) : 'a';
+                                                                        const newVal = currentVal + (currentVal.endsWith('\n') || !currentVal ? '' : '\n') + `   ${nextLetter}) `;
+                                                                        updateQuestionData(sIdx, qIdx, (t) => { t.text = newVal; });
+                                                                    }}
+                                                                    className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold border border-indigo-200 rounded-lg text-xs transition-colors"
+                                                                >
+                                                                    + سطر فرعي (a, b)
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                {/* SVG code if any */}
+                                                <div className="flex flex-col w-full text-right mt-1">
+                                                    <label className="text-xs text-gray-500 mb-1 font-bold">كود SVG للرسم (اختياري)</label>
+                                                    <textarea
+                                                        dir="ltr"
+                                                        className="w-full p-2 border border-emerald-300 rounded-xl bg-emerald-50 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[50px] text-left text-xs font-mono whitespace-pre"
+                                                        value={q.svgCode || ''}
+                                                        onChange={(e) => updateQuestionData(sIdx, qIdx, (t) => t.svgCode = e.target.value)}
+                                                        placeholder="<svg>...</svg>"
+                                                    />
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            /* View Mode: Single Continuous Unified Block with SVG text-wrapping starting at code line */
+                                            <div className="w-full space-y-2">
+                                                <div className="flex items-center justify-between pb-1.5 border-b border-gray-100">
+                                                    <div className="flex items-center gap-2">
+                                                        {getQuestionTitleNode(section, sIdx, qIdx, false)}
+                                                        {q.points && (
+                                                            <span className="text-xs font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">
+                                                                ({q.points} درجة)
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+
+                                                {(() => {
+                                                    const rawFullText = getQuestionFullText(q);
+                                                    const unifiedContent = (q.svgCode && !rawFullText.includes('<svg'))
+                                                        ? `${q.svgCode}\n${rawFullText}`
+                                                        : rawFullText;
+                                                    return (
+                                                        <div className="w-full text-gray-900 leading-relaxed font-normal text-sm overflow-visible">
+                                                            <MathRenderer className="w-full overflow-visible [&_p]:mb-2 [&_p]:last:mb-0" content={unifiedContent} />
+                                                        </div>
+                                                    );
+                                                })()}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* Solution */}
+                                {showAnswers && (q.solution || q.solutionSvgCode) && (
+                                    <div className={`mt-3.5 p-4 bg-yellow-50 border border-yellow-200 rounded-xl text-sm text-yellow-950 break-inside-avoid print:break-inside-auto flex flex-col min-h-fit overflow-visible clear-both ${!showAnswers ? 'no-print' : 'print:bg-gray-50 print:border-gray-300'}`}>
+                                        <div className="font-bold mb-2 text-yellow-900 flex items-center justify-between border-b border-yellow-200/60 pb-1.5">
+                                            <span className="flex items-center gap-1.5">
+                                                <CheckCircle2 size={15} className="text-emerald-700" />
+                                                <span>الحل وسلم التصحيح:</span>
+                                            </span>
+                                            {section.sectionType === 'mcq' && (
+                                                <div className="font-bold text-green-800 flex items-center gap-2 text-xs">
+                                                    الإجابة الصحيحة: 
+                                                    {isEditing ? (
+                                                        <select 
+                                                            className="p-1 border border-yellow-400 rounded bg-yellow-100"
+                                                            value={q.correctOptionIndex || 0}
+                                                            onChange={(e) => updateQuestionData(sIdx, qIdx, (t) => t.correctOptionIndex = parseInt(e.target.value))}
+                                                        >
+                                                            {q.options?.map((_: any, idx: number) => (
+                                                                <option key={idx} value={idx}>{String.fromCharCode(65 + idx)}</option>
+                                                            ))}
+                                                        </select>
+                                                    ) : (
+                                                        `(${String.fromCharCode(65 + (q.correctOptionIndex || 0))})`
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                        {isEditing ? (
+                                            <div className="flex flex-col gap-2">
+                                                <SmartMathEditor 
+                                                    value={q.solution}
+                                                    onChange={(val) => updateQuestionData(sIdx, qIdx, (t) => t.solution = val)}
+                                                    placeholder="اكتب الحل هنا..."
+                                                />
+                                                <label className="text-xs text-gray-500 font-bold">كود SVG للحل (اختياري)</label>
                                                 <textarea
                                                     dir="ltr"
-                                                    className="w-full p-2 border border-emerald-300 rounded bg-emerald-50 focus:outline-none focus:ring-2 focus:ring-emerald-500 min-h-[60px] text-left text-xs font-mono whitespace-pre"
-                                                    value={q.svgCode || ''}
-                                                    onChange={(e) => updateQuestionData(sIdx, qIdx, (t) => t.svgCode = e.target.value)}
+                                                    className="w-full p-2 border border-emerald-300 rounded bg-emerald-50 focus:outline-none text-left text-xs font-mono whitespace-pre"
+                                                    value={q.solutionSvgCode || ''}
+                                                    onChange={(e) => updateQuestionData(sIdx, qIdx, (t) => t.solutionSvgCode = e.target.value)}
                                                     placeholder="<svg>...</svg>"
                                                 />
                                             </div>
-                                        </div>
-                                    ) : (
-                                        <div className={`flex gap-2 font-bold mb-2 break-inside-avoid ${isEditing && 'opacity-70'}`}>
-                                            {getQuestionTitleNode(section.sectionType, qIdx, false)}
-                                            <MathRenderer className="flex-1" content={q.text} />
-                                        </div>
-                                    )}
-                                    
-                                    {/* MCQ Options */}
-                                    {section.sectionType === 'mcq' && q.options && (
-                                        <div className="w-full mt-2 mb-3 break-inside-avoid">
-                                            <table className="w-full border-collapse border border-gray-300 print:border-black text-center" dir="rtl">
-                                                <tbody>
-                                                    <tr>
-                                                        {Array.from({ length: 4 }).map((_, oIdx) => {
-                                                            const label = String.fromCharCode(65 + oIdx);
-                                                            const opt = q.options && q.options[oIdx] !== undefined ? q.options[oIdx] : '';
-                                                            return (
-                                                                <React.Fragment key={oIdx}>
-                                                                    <td 
-                                                                        className="border border-gray-300 print:border-black p-1.5 print:p-1 font-bold align-middle text-center bg-gray-100 print:bg-gray-100 w-[5%] whitespace-nowrap"
-                                                                        style={{ backgroundColor: '#eaeaea' }}
-                                                                    >
-                                                                        {label}
-                                                                    </td>
-                                                                    <td className="border border-gray-300 print:border-black p-1.5 print:p-1 align-middle text-center w-[20%]">
-                                                                        <div className="flex flex-col items-center justify-center gap-2 min-h-fit overflow-visible">
-                                                                            {isEditing ? (
-                                                                                <SmartMathEditor 
-                                                                                    className="w-full"
-                                                                                    value={opt}
-                                                                                    onChange={(val) => updateQuestionData(sIdx, qIdx, (t) => {
-                                                                                        if (!t.options) t.options = ['', '', '', ''];
-                                                                                        t.options[oIdx] = val;
-                                                                                    })}
-                                                                                    placeholder={`الخيار ${label}...`}
-                                                                                />
-                                                                            ) : (
-                                                                                <MathRenderer className="flex-1 break-words whitespace-normal text-center w-full overflow-visible" content={opt} />
-                                                                            )}
-                                                                        </div>
-                                                                    </td>
-                                                                </React.Fragment>
-                                                            );
-                                                        })}
-                                                    </tr>
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    )}
-
-                                    {/* SubQuestions */}
-                                    {q.subQuestions && (
-                                        <div className="flex flex-col gap-2 pr-4 mb-4 font-medium break-inside-avoid w-full">
-                                            {q.subQuestions.map((sq: string, sqIdx: number) => {
-                                                const cleanSq = sq.replace(/^[\s\d\-\.\)\(]*([①②③④⑤⑥⑦⑧⑨⑩⑪⑫])?[\s\d\-\.\)\(]*/, '$1');
+                                        ) : (
+                                            (() => {
+                                                const fullSolution = (q.solutionSvgCode && !q.solution?.includes('<svg'))
+                                                    ? `${q.solutionSvgCode}\n${q.solution || ''}`
+                                                    : (q.solution || '');
                                                 return (
-                                                <div key={sqIdx} className="w-full flex items-start gap-2">
-                                                    {isEditing ? (
-                                                        <div className="w-full flex items-start gap-2">
-                                                            <SmartMathEditor 
-                                                                className="w-full mt-1"
-                                                                value={sq}
-                                                                onChange={(val) => updateQuestionData(sIdx, qIdx, (t) => t.subQuestions[sqIdx] = val)}
-                                                                placeholder={`طلب ${sqIdx + 1}...`}
-                                                            />
-                                                            <button
-                                                                onClick={() => handleRemoveSubQuestion(sIdx, qIdx, sqIdx)}
-                                                                className="p-1.5 mt-1 bg-red-50 hover:bg-red-100 text-red-600 rounded"
-                                                                title="حذف الطلب"
-                                                            >
-                                                                <Trash size={16} />
-                                                            </button>
-                                                        </div>
-                                                    ) : (
-                                                        <>
-                                                            <span className="inline-flex items-center justify-center w-5 h-5 rounded-full border border-black text-xs font-bold shrink-0 mt-0.5" style={{lineHeight: 1}}>{sqIdx + 1}</span>
-                                                            <MathRenderer content={cleanSq} className="flex-1" />
-                                                        </>
-                                                    )}
-                                                </div>
-                                            )})}
-                                            {isEditing && (
-                                                <button
-                                                    onClick={() => handleAddSubQuestion(sIdx, qIdx)}
-                                                    className="self-start mt-2 px-3 py-1 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-md text-sm font-bold flex items-center gap-1"
-                                                >
-                                                    <Plus size={14} /> إضافة طلب
-                                                </button>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-
-                                {/* Left side: SVG (stays left in RTL print) */}
-                                {q.svgCode && (
-                                    <div className="w-[190px] md:w-[310px] print:w-[190pt] aspect-square shrink-0 border border-gray-200 rounded-lg p-2 bg-white flex items-center justify-center break-inside-avoid shadow-sm print:border-transparent print:shadow-none not-prose overflow-hidden">
-                                        <div className="w-full h-full flex items-center justify-center [&>svg]:max-w-full [&>svg]:max-h-full [&>svg]:w-auto [&>svg]:h-auto [shape-rendering:geometricPrecision]" dangerouslySetInnerHTML={{__html: q.svgCode}} />
+                                                    <div className="w-full leading-relaxed overflow-visible">
+                                                        <MathRenderer className="w-full overflow-visible [&_p]:mb-2 [&_p]:last:mb-0" content={fullSolution} />
+                                                    </div>
+                                                );
+                                            })()
+                                        )}
                                     </div>
                                 )}
-                            </div>
-
-                            {/* Solution */}
-                            {showAnswers && q.solution && (
-                                <div className={`mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-900 break-inside-avoid print:break-inside-auto flex flex-col min-h-fit overflow-visible ${!showAnswers ? 'no-print' : 'print:bg-gray-50 print:border-gray-300'}`}>
-                                    <div className="font-bold mb-2">الحل: </div>
-                                    {section.sectionType === 'mcq' && (
-                                        <div className="mb-2 font-bold text-green-700 flex items-center gap-2">
-                                            الإجابة الصحيحة: 
-                                            {isEditing ? (
-                                                <select 
-                                                    className="p-1 border border-yellow-400 rounded bg-yellow-100"
-                                                    value={q.correctOptionIndex || 0}
-                                                    onChange={(e) => updateQuestionData(sIdx, qIdx, (t) => t.correctOptionIndex = parseInt(e.target.value))}
-                                                >
-                                                    {q.options.map((_: any, idx: number) => (
-                                                        <option key={idx} value={idx}>{String.fromCharCode(65 + idx)}</option>
-                                                    ))}
-                                                </select>
-                                            ) : (
-                                                `(${String.fromCharCode(65 + (q.correctOptionIndex || 0))})`
-                                            )}
-                                        </div>
-                                    )}
-                                    {isEditing ? (
-                                        <div className="flex flex-col gap-2">
-                                            <SmartMathEditor 
-                                                value={q.solution}
-                                                onChange={(val) => updateQuestionData(sIdx, qIdx, (t) => t.solution = val)}
-                                                placeholder="اكتب الحل هنا..."
-                                            />
-                                            <label className="text-xs text-gray-500 font-bold">كود SVG للحل (اختياري)</label>
-                                            <textarea
-                                                dir="ltr"
-                                                className="w-full p-2 border border-emerald-300 rounded bg-emerald-50 focus:outline-none text-left text-xs font-mono whitespace-pre"
-                                                value={q.solutionSvgCode || ''}
-                                                onChange={(e) => updateQuestionData(sIdx, qIdx, (t) => t.solutionSvgCode = e.target.value)}
-                                                placeholder="<svg>...</svg>"
-                                            />
-                                        </div>
-                                    ) : (
-                                        <div className="flex flex-col print:flex-row md:flex-row gap-4 print:gap-2 w-full items-start">
-                                            <div className="flex-1 min-w-0">
-                                                <MathRenderer content={q.solution} />
-                                            </div>
-                                            {q.solutionSvgCode && (
-                                                <div className="w-[190px] md:w-[310px] print:w-[190pt] aspect-square shrink-0 border border-gray-200 rounded-lg p-2 bg-white flex items-center justify-center break-inside-avoid shadow-sm print:border-transparent print:shadow-none not-prose overflow-hidden">
-                                                    <div className="w-full h-full flex items-center justify-center [&>svg]:max-w-full [&>svg]:max-h-full [&>svg]:w-auto [&>svg]:h-auto [shape-rendering:geometricPrecision]" dangerouslySetInnerHTML={{ __html: q.solutionSvgCode }} />
-                                                </div>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
                         </div>
                     ))}
                 </div>
@@ -1152,15 +1522,32 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
 
                 {/* Fixable Issues List */}
                 <div className="bg-gray-50 p-6 rounded-2xl border border-gray-200">
-                  <h4 className="text-xl font-bold mb-4 border-b pb-2 flex items-center justify-between">
-                    <span className="flex items-center gap-2">
+                  <div className="flex items-center justify-between border-b pb-3 mb-4">
+                    <h4 className="text-xl font-bold flex items-center gap-2">
                       <Sparkles size={20} className="text-indigo-600" />
                       الأخطاء المكتشفة القابلة للإصلاح
-                    </span>
-                    <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full uppercase">
-                      {test.reviewIssues?.length || 0} خطأ
-                    </span>
-                  </h4>
+                    </h4>
+                    <div className="flex items-center gap-2">
+                      {test.reviewIssues && test.reviewIssues.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (selectedIssueIds.length === test.reviewIssues!.length) {
+                              setSelectedIssueIds([]);
+                            } else {
+                              setSelectedIssueIds(test.reviewIssues!.map(i => i.id));
+                            }
+                          }}
+                          className="text-xs font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-lg transition-colors"
+                        >
+                          {selectedIssueIds.length === test.reviewIssues.length ? 'إلغاء تحديد الكل' : 'تحديد الكل'}
+                        </button>
+                      )}
+                      <span className="text-xs bg-indigo-100 text-indigo-700 font-bold px-2.5 py-1 rounded-full">
+                        {test.reviewIssues?.length || 0} خطأ
+                      </span>
+                    </div>
+                  </div>
                   
                   {test.reviewIssues && test.reviewIssues.length > 0 ? (
                     <div className="space-y-4">
@@ -1479,6 +1866,19 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack }) => {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Question Edit Modal with Dual-Pane Editor & Live Simulation */}
+      {editingQuestionModalData && (
+        <QuestionEditModal
+          isOpen={!!editingQuestionModalData}
+          onClose={() => setEditingQuestionModalData(null)}
+          section={editingQuestionModalData.section}
+          sectionIdx={editingQuestionModalData.sectionIdx}
+          questionIdx={editingQuestionModalData.questionIdx}
+          question={editingQuestionModalData.question}
+          onSave={handleSaveQuestionFromModal}
+        />
       )}
     </div>
   );

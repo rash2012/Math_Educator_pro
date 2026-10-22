@@ -3,16 +3,26 @@ import { db, type Document, type Exercise, type LessonSection } from "../db";
 import { AI_BOOKLET_NOTEBOOK_PROMPT } from "./aiBookletPrompts";
 import { convertPdfDataToImages } from "./pdf";
 import { globalOrchestrator } from "./multiAgent";
+import { correctionAgent } from "./correctionAgent";
 import { generateSvgFromConceptMap, generateSvgFromTree } from "../utils/mindmapSvgGenerator";
 import { normalizeConceptMapData, CATEGORY_CONFIG } from "../utils/mindmapParser";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
+    }
+  }
+});
 
 export const MODELS_FALLBACK = [
+  "gemini-3.8-flash",
   "gemini-3.5-flash",
   "gemini-3.1-pro-preview",
-  "gemini-2.5-flash",
-  "gemini-2.5-pro"
+  "gemini-flash-latest",
+  "gemini-3.1-flash-lite",
+  "gemini-2.5-flash"
 ];
 
 // ============================================================================
@@ -261,6 +271,75 @@ export function cleanJson(text: string): any {
   }
 }
 
+/**
+ * تنظيف نصوص فكرة واستراتيجية الحل من عبارات التوجيه الفوقية والوسوم المصطنعة
+ * مثل: "العنوان الرئيسي باللون الأحمر:" و "العنوان الفرعي باللون الأزرق:"
+ */
+export function cleanStrategyMetaHeaders(text: string): string {
+  if (!text) return '';
+  let cleaned = text;
+
+  // 1. إزالة أي بادئة "💡 فكرة واستراتيجية الحل:" أو "فكرة واستراتيجية الحل:" أو مشتقاتها
+  cleaned = cleaned.replace(/^[*\s#💡]*(?:فكرة\s*واستراتيجية\s*الحل|استراتيجية\s*الحل|💡\s*فكرة\s*واستراتيجية\s*الحل|فكرة\s*الحل|منهجية\s*الحل)[:*#\s-]*/i, '');
+
+  // 2. إزالة عبارات التوجيه الفوقية مثل "العنوان الرئيسي باللون الأحمر:" أو "العنوان الفرعي باللون الأزرق:" ومشتقاتها
+  // 2. إزالة عبارات التوجيه الفوقية بالكامل
+  // هذا التعبير يستهدف العبارات بمرونة أكبر ويزيل أي علامات تسبقها أو تليها
+  cleaned = cleaned.replace(/(?:[\s*#]*)?(?:العناوين\s+الرئيسية(?:\s+باللون\s+الأحمر)?|العنوان\s+الرئيسي(?:\s+باللون\s+الأحمر)?|العناوين\s+الفرعية(?:\s+باللون\s+الأزرق)?|العنوان\s+الفرعي(?:\s+باللون\s+الأزرق)?)(?:[\s*#]*[:\s-]*)?/gi, '');
+
+  // 3. تنظيف أي أسطر تالفة، علامات زائدة، أو فراغات ناتجة عن التنظيف
+  cleaned = cleaned.replace(/^\s*[:*#\s-]+\n/gm, '\n');
+  // إزالة أي نجوم أو هاشات متبقية في بداية الأسطر إذا كانت فارغة أو زائدة
+  cleaned = cleaned.replace(/^[*\s#]+(?=\n)/gm, '');
+  cleaned = cleaned.replace(/\*\s*\*/g, '');
+  cleaned = cleaned.replace(/#\s*#/g, '');
+
+  return cleaned.trim();
+}
+
+/**
+ * يفصل بدقة بين نص الحل (solutionText) وفكرة واستراتيجية الحل (strategyText)
+ * ويضمن عدم تسرب عنوان أو فقرة الاستراتيجية إلى حاوية حل التمرين،
+ * ووضعها حصراً في الحاوية المخصصة لها، مع الحفاظ على إيجازها وعموميتها وتنظيف أي عبارات توجيه مصطنعة.
+ */
+export function separateStrategyAndSolution(
+  solutionText: string,
+  strategyText?: string
+): { cleanSolution: string; cleanStrategy: string } {
+  let cleanSol = (solutionText || '').trim();
+  let cleanStrat = cleanStrategyMetaHeaders(strategyText || '');
+
+  // فحص ما إذا كان نص الحل يحتوي في بدايته (أو ضمنه) على فقرة الاستراتيجية
+  const strategyRegex = /(?:^|\n)(?:[*\s#💡]*)(?:فكرة\s*واستراتيجية\s*الحل|استراتيجية\s*الحل|استراتيجية\s+[^\n*]{3,60})(?:[*:#\s]*)([\s\S]*?)(?=(?:\n\s*(?:\*(?:حل\s+الطلب|الطلب|الحل|خطوات\s+الحل|الإثبات|البرهان|طريقة\s+الحل|المرحلة)|①|②|1\.|2\.|\*#[^#]+#\*))|$)/i;
+
+  const match = cleanSol.match(strategyRegex);
+  if (match) {
+    const fullMatchedBlock = match[0];
+    const extractedBody = (match[1] || '').trim();
+
+    // إذا كانت الاستراتيجية الحالية فارغة أو مقتضبة، نعتمد ما تم استخراجه
+    if (!cleanStrat || cleanStrat.length < 15) {
+      cleanStrat = cleanStrategyMetaHeaders(extractedBody);
+    }
+
+    // حذف فقرة الاستراتيجية تماماً من نص الحل
+    cleanSol = cleanSol.replace(fullMatchedBlock, '\n').trim();
+  }
+
+  // إزالة أي أسطر إضافية تبدأ بـ "💡 فكرة واستراتيجية الحل:" أو ما شابه ذلك من رأس نص الحل
+  cleanSol = cleanSol
+    .replace(/^(?:[*\s#💡]*)(?:فكرة\s*واستراتيجية\s*الحل|استراتيجية\s*الحل|💡\s*استراتيجية\s*الحل)[^\n]*\n+/i, '')
+    .trim();
+
+  // تنظيف أي بقايا لعبارات التوجيه في نص الحل أيضاً
+  cleanSol = cleanSol.replace(/(?:\*|#|\*\*)*\s*(?:العنوان\s+الرئيسي(?:\s+باللون\s+الأحمر)?|العنوان\s+الفرعي(?:\s+باللون\s+الأزرق)?)\s*[:*#\s-]*/gi, '');
+
+  return {
+    cleanSolution: cleanSol.trim(),
+    cleanStrategy: cleanStrategyMetaHeaders(cleanStrat)
+  };
+}
+
 // ============================================================================
 // 🌟 Model Fallback Engine
 // ============================================================================
@@ -379,9 +458,9 @@ CRITICAL INSTRUCTIONS:
    - CRITICAL: The correct option index MUST be RANDOMLY distributed across all indices (0, 1, 2, 3). 
    - Ensure that NOT all questions have the same correct index (e.g., don't make them all 'A'). 
    - Statistically, ensure that each index (0=A, 1=B, 2=C, 3=D) appears approximately 2-3 times across the 10 questions. Index 3 (D) MUST be used.
-   B) "questions" -> Title: "ثانياً: حل الأسئلة الآتية:" -> EXACTLY 3 questions. Each MUST have AT LEAST 2 sub-questions. Direct applications, slightly complex if advanced settings demand.
-   C) "exercises" -> Title: "ثالثاً: حل التمارين الآتية:" -> EXACTLY 3 exercises. Each MUST have AT LEAST 3 sub-questions. Harder than the previous section.
-   D) "problems" -> Title: "رابعاً: حل المسألتين الآتيتين:" -> EXACTLY 2 problems. Each MUST have AT LEAST 5 sub-questions. Highly compound problems, combining concepts across units.
+   B) "questions" -> Title: "ثانياً: حل الأسئلة الآتية:" -> EXACTLY 3 questions. Each MUST have AT LEAST 2 requests. Direct applications, slightly complex if advanced settings demand. Put all question hypotheses and numbered requests together inside the single "text" field using \n 1) ... \n 2) ...
+   C) "exercises" -> Title: "ثالثاً: حل التمارين الآتية:" -> EXACTLY 3 exercises. Each MUST have AT LEAST 3 requests. Harder than the previous section. Put all hypotheses and numbered requests together inside the single "text" field using \n 1) ... \n 2) ...
+   D) "problems" -> Title: "رابعاً: حل المسألتين الآتيتين:" -> EXACTLY 2 problems. Each MUST have AT LEAST 5 requests. Highly compound problems, combining concepts across units. Put all problem hypotheses and numbered requests together inside the single "text" field using \n 1) ... \n 2) ...
 6. Estimated Time: Provide an estimated time in minutes (e.g., 180) for an 18-year-old student to accurately solve the test.
 7. Mathematical Formatting: EVERY mathematical variable, equation, or number MUST be wrapped in a single '$' symbol. NEVER use double dollar '$$' markers. ALWAYS use proper LaTeX conventions. 
    - CRITICAL RULE FOR ARABIC TEXT & LATEX DELIMITERS ($):
@@ -400,8 +479,10 @@ CRITICAL INSTRUCTIONS:
    - GRAPHIC SOLUTIONS: If a question asks to "Draw" (ارسم) a function graph or geometric shape, you MUST generate the high-fidelity SVG code for it and place it in "solutionSvgCode".
    - TABLE SOLUTIONS: For "Variation Tables" (جدول التغيرات), monotonicity, or relative position, strictly use LaTeX (array environment) within the "solution" text field. DO NOT use SVG for these unless explicitly requested by the user's advanced settings to be a diagram.
 9. Graphic SVGs: Provide high-fidelity SVG code for questions requiring a graph or shape in "svgCode" (if part of the question prompt) OR in "solutionSvgCode" (if it is the DRAWN answer to the question).
-10. Tone: Professional educational Arabic. Do NOT use copy-paste; innovate the questions based on deep understanding.
-11. CRITICAL JSON RULE: NO LITERAL NEWLINES IN STRINGS. You MUST use \\\\n for line breaks inside strings. Literal newline characters inside quotes will break JSON parsing.
+10. Unified Text Block Architecture: In non-MCQ sections (questions, exercises, problems), combine the full hypothesis and all numbered requests directly into the single "text" field. Do NOT output a separate "subQuestions" field. Format requests within "text" as:
+   "text": "نص المسألة أو الفرضية العامة...\\n1) الطلب الأول\\n2) الطلب الثاني\\n   a) الطلب الفرعي الأول\\n   b) الطلب الفرعي الثاني\\n3) الطلب الثالث"
+11. Tone: Professional educational Arabic. Do NOT use copy-paste; innovate the questions based on deep understanding.
+12. CRITICAL JSON RULE: NO LITERAL NEWLINES IN STRINGS. You MUST use \\\\n for line breaks inside strings. Literal newline characters inside quotes will break JSON parsing.
 
 Output Format: A STRICT JSON object representing the test:
 {
@@ -419,21 +500,21 @@ Output Format: A STRICT JSON object representing the test:
       "sectionType": "questions",
       "title": "ثانياً: حل الأسئلة الآتية:",
       "questions": [
-        { "text": "نص السؤال العام", "subQuestions": ["① الطلب الأول", "② الطلب الثاني"], "solution": "① شرح الحل الأول... \\\\n ② شرح الحل الثاني...", "svgCode": "", "solutionSvgCode": "" }
+        { "text": "نص السؤال العام...\\\\n1) الطلب الأول\\\\n2) الطلب الثاني", "solution": "① شرح الحل الأول... \\\\n ② شرح الحل الثاني...", "svgCode": "", "solutionSvgCode": "" }
       ]
     },
     {
       "sectionType": "exercises",
       "title": "ثالثاً: حل التمارين الآتية:",
       "questions": [
-        { "text": "نص التمرين", "subQuestions": ["① الطلب الأول", "② الطلب الثاني", "③ الطلب الثالث"], "solution": "① الحل الأول... \\\\n ② الحل الثاني... \\\\n ③ الحل الثالث...", "svgCode": "", "solutionSvgCode": "" }
+        { "text": "نص التمرين...\\\\n1) الطلب الأول\\\\n2) الطلب الثاني\\\\n3) الطلب الثالث", "solution": "① الحل الأول... \\\\n ② الحل الثاني... \\\\n ③ الحل الثالث...", "svgCode": "", "solutionSvgCode": "" }
       ]
     },
     {
       "sectionType": "problems",
       "title": "رابعاً: حل المسألتين الآتيتين:",
       "questions": [
-        { "text": "نص المسألة", "subQuestions": ["① الطلب الأول", "② الطلب الثاني", "③ الطلب الثالث", "④ الطلب الرابع", "⑤ الطلب الخامس"], "solution": "① الحل... \\\\n ② الحل... \\\\n ③ الحل... \\\\n ④ الحل... \\\\n ⑤ الحل...", "svgCode": "", "solutionSvgCode": "" }
+        { "text": "نص المسألة...\\\\n1) الطلب الأول\\\\n2) الطلب الثاني\\\\n   a) طلب فرعي أول\\\\n   b) طلب فرعي ثانٍ\\\\n3) الطلب الثالث\\\\n4) الطلب الرابع\\\\n5) الطلب الخامس", "solution": "① الحل... \\\\n ② الحل... \\\\n ③ الحل... \\\\n ④ الحل... \\\\n ⑤ الحل...", "svgCode": "", "solutionSvgCode": "" }
       ]
     }
   ]
@@ -476,7 +557,20 @@ ${pdfContent.substring(0, 80000)} // Limiting size to prevent exceeding token li
   });
 
   const text = response.text;
-  return cleanJson(text);
+  const parsed = cleanJson(text);
+  if (parsed && Array.isArray(parsed.sections)) {
+    parsed.sections = await Promise.all(parsed.sections.map(async (sec: any) => {
+      if (Array.isArray(sec.questions)) {
+        sec.questions = await correctionAgent.reviewAndCorrectQuestions(sec.questions, {
+          title: sec.title || config.unit || "اختبار شامل",
+          unit: config.unit,
+          generatorModel: "gemini-3.8-flash"
+        });
+      }
+      return sec;
+    }));
+  }
+  return parsed;
 }
 
 export async function generateAlternativeQuestion(
@@ -522,7 +616,7 @@ OUTPUT FORMAT: Strict JSON based on the sectionType requested.
 If \`mcq\`:
 { "text": "...", "options": ["...", "...", "...", "..."], "correctOptionIndex": 0, "solution": "...", "svgCode": "" }
 Otherwise (\`questions\`, \`exercises\`, \`problems\`):
-{ "text": "...", "subQuestions": ["...", "..."], "solution": "...", "svgCode": "" }
+{ "text": "نص المسألة أو الفرضية العامة...\\\\n1) الطلب الأول\\\\n2) الطلب الثاني", "solution": "...", "svgCode": "", "solutionSvgCode": "" }
 
 CRITICAL: Return ONLY valid JSON.
 `;
@@ -601,6 +695,8 @@ STRICT CONSTRAINTS & RULES (CRITICAL):
    - If the task is to create a Variation Table (جدول التغيرات), study monotonicity (الاطراد), or relative position (الوضع النسبي), you MUST use LaTeX (array environment) inside the "solution" text instead of SVG.
 6. Language: Use professional, high-quality educational Arabic.
 7. Strict Methodology Adherence (MANDATORY): You MUST use ONLY the tools, theorems, results, and methods provided in the curriculum's reference content. Absolute ban on using methods or shortcuts not taught in the provided curriculum (e.g., L'Hôpital's rule if it is not explicitly in the reference, or specialized coordinate systems). The solution must be mathematically consistent with the reference's teaching style and theorems. Do NOT use any "outside" knowledge that isn't justified by the reference.
+
+8. ضابط فكرة واستراتيجية الحل (strategyText): اكتب الفكرة العامة للتمرين وطريقة الحل بشكل موجز ومكثف (سطران إلى 4 أسطر فقط)، وليس شرحاً كاملاً أو تفصيلياً لكافة الطلبات؛ لأن تفصيل خطوات كل طلب مكانه الحصري في مصفوفة حلول الطلبات (solutions).
 
 Return the result as a STRICT JSON array of objects corresponding to the subQuestions, each with:
 - "id": The id of the sub-question.
@@ -719,7 +815,15 @@ ${pdfContent.substring(0, 150000)}
     }
   });
 
-  return cleanJson(response.text || "[]");
+  const parsed = cleanJson(response.text || "[]");
+  if (Array.isArray(parsed) && parsed.length > 0) {
+    return await correctionAgent.reviewAndCorrectQuestions(parsed, {
+      title: config.unit || "بنك الأسئلة",
+      unit: config.unit,
+      generatorModel: "gemini-3.8-flash"
+    });
+  }
+  return parsed;
 }
 
 export async function generateSummaryText(
@@ -767,7 +871,10 @@ ${pdfContent.substring(0, 100000)}
     config: { temperature: 0.2 }
   });
 
-  return response.text || "";
+  return await correctionAgent.reviewAndCorrectText(response.text || "", {
+    title: config.unit,
+    generatorModel: "gemini-3.8-flash"
+  });
 }
 
 export async function generateExpandedSummaryText(
@@ -824,7 +931,10 @@ ${pdfContent.substring(0, 100000)}
     config: { temperature: 0.3 }
   });
 
-  return response.text || "";
+  return await correctionAgent.reviewAndCorrectText(response.text || "", {
+    title: config.unit,
+    generatorModel: "gemini-3.8-flash"
+  });
 }
 
 export async function generateCondensedSummaryText(
@@ -856,7 +966,10 @@ ${existingSummary}
     config: { temperature: 0.15 }
   });
 
-  return response.text || "";
+  return await correctionAgent.reviewAndCorrectText(response.text || "", {
+    title: "ملخص مكثف",
+    generatorModel: "gemini-3.8-flash"
+  });
 }
 
 export async function generateOnlyMCQs(
@@ -919,7 +1032,15 @@ ${pdfContent.substring(0, 100000)}
   });
 
   try {
-    return cleanJson(response.text || "[]");
+    const parsed = cleanJson(response.text || "[]");
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return await correctionAgent.reviewAndCorrectQuestions(parsed, {
+        title: config.unit || "أسئلة اختيار من متعدد",
+        unit: config.unit,
+        generatorModel: "gemini-3.8-flash"
+      });
+    }
+    return parsed;
   } catch (e) {
     console.error("Failed parsing MCQs JSON", e);
     return [];
@@ -985,7 +1106,15 @@ ${pdfContent.substring(0, 100000)}
   });
 
   try {
-    return cleanJson(response.text || "[]");
+    const parsed = cleanJson(response.text || "[]");
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return await correctionAgent.reviewAndCorrectQuestions(parsed, {
+        title: config.unit || "مسائل مقالية",
+        unit: config.unit,
+        generatorModel: "gemini-3.8-flash"
+      });
+    }
+    return parsed;
   } catch (e) {
     console.error("Failed parsing Essay JSON", e);
     return [];
@@ -1371,6 +1500,13 @@ ${rawText.substring(0, 150000)}
       };
     });
 
+    // تدقيق مسائل وتمرينات الوحدة المستخلصة وحلولها عبر الوكيل المُحكّم المستقل (correctionAgent)
+    const auditedPracticeExercises = await correctionAgent.reviewAndCorrectPracticeExercises(practiceExercises, {
+      title: defaultTitle,
+      unit: docMetadata.unit,
+      generatorModel: "gemini-3.8-flash"
+    });
+
     // Save as practice-only lesson section
     await db.lessonSections.add({
       docId: newDocId,
@@ -1379,13 +1515,13 @@ ${rawText.substring(0, 150000)}
       practiceSectionLabel: 'تمرينات ومسائل الوحدة',
       order: 0,
       isPracticeOnly: true,
-      practiceExercises: practiceExercises
+      practiceExercises: auditedPracticeExercises
     });
 
     const exercises = parsed.map((item: any, index: number) => ({
       docId: newDocId,
       label: `التمرين ${index + 1}`,
-      mainText: practiceExercises[index]?.questionText || item.mainText || '',
+      mainText: auditedPracticeExercises[index]?.questionText || item.mainText || '',
       svgCode: item.svgCode || '',
       strategyText: item.strategyText || '',
       subQuestions: Array.isArray(item.subQuestions) && item.subQuestions.length > 0
@@ -1677,7 +1813,7 @@ CRITICAL INSTRUCTIONS:
      * NEVER write: "$مستقيم يمر بالنقطة A(2i) ويميل بزاوية \frac{\pi}{4}$"
      * Ensure that Arabic linking text/conjunctions (like 'أو', 'فإن', 'إذاً', 'حيث', 'يمر بـ') are strictly outside the '$' signs.
 4. Tone: Professional educational Arabic.
-5. Sub-questions numbering & formatting: If there are sub-questions/sub-parts, you MUST strictly number their solution steps using circled numbers such as ①, ②, ③, ④, ⑤. Do NOT use regular numbers (like '1.', '2.', '1)', '2)'), English letters, or text phrases like "الطلب الأول:" or "الطلب الثاني:". Every sub-question answer step in the solution field must start with the circled number (e.g., "① ... \n\n ② ...") and have clear double-newlines between steps to avoid overlap. Ensure that if the incoming question lists sub-questions with normal numbering or text headers, you also return the correctedQuestion with circled numbers ①, ②, ③ in its text and subQuestions.
+5. Sub-questions numbering & formatting: If there are sub-questions/sub-parts, you MUST strictly number their solution steps using circled numbers such as ①, ②, ③, ④, ⑤. Do NOT use regular numbers (like '1.', '2.', '1)', '2)'), English letters, or text phrases like "الطلب الأول:" or "الطلب الثاني:". Every sub-question answer step in the solution field must start with the circled number (e.g., "① ... \n\n ② ...") and have clear double-newlines between steps to avoid overlap.
 6. Slash restriction: Do NOT output the slash character '/' at the end of lines.
 7. Visualization Logic: 
    - If the solution requires drawing a function graph (رسم الخط البياني للتابع) or a geometric shape, you MUST generate a high-fidelity SVG for it and include it in "solutionSvgCode".
@@ -1688,8 +1824,7 @@ CRITICAL INSTRUCTIONS:
   "solutionSvgCode": "SVG code for variation table if needed, otherwise empty string",
   "hasError": boolean,
   "correctedQuestion": {
-    "text": "Corrected main text if needed",
-    "subQuestions": ["Corrected subq 1", "Corrected subq 2"]
+    "text": "Corrected full question text (hypothesis and numbered requests combined in single text field)"
   }
 }
 Return ONLY valid JSON.
@@ -1702,8 +1837,11 @@ Return ONLY valid JSON.
 
   const parsed = cleanJson(response.text);
   if (parsed && parsed.solution) {
-    const validated = globalOrchestrator.validateMathSolution(parsed.solution, "حل سؤال امتحاني");
-    parsed.solution = validated.text;
+    parsed.solution = await correctionAgent.reviewAndCorrectSolution(parsed.solution, {
+      questionText: contentToSolve,
+      title: "حل سؤال امتحاني",
+      generatorModel: "gemini-3.8-flash"
+    });
   }
   return parsed;
 }
@@ -1762,7 +1900,8 @@ STRICT CONSTRAINTS:
 4. Terminology: Use "تابع" instead of "دالة".
 5. Language: Professional educational Arabic.
 6. Formatting: 
-   - Use professional numbering: 1. 2. 3. for main steps.
+   - Heading Colors Mandate: Main titles MUST always be in RED (*العنوان الرئيسي باللون الأحمر*), and subheadings in BLUE (*#العنوان الفرعي باللون الأزرق#*).
+   - Use circled numbers ①, ②, ③ for question steps/requests.
    - For variation tables (جدول تغيرات), definitely provide a high-fidelity SVG code embedded directly in the text.
    - Use double newlines for spacing.
    - Ensure the solution is rigorous and easy to follow.
@@ -1779,7 +1918,12 @@ ${content}
     };
 
     const response = await generateWithFallback(MODELS_FALLBACK, payload);
-    return (response.text || "").trim();
+    const rawSol = (response.text || "").trim();
+    return await correctionAgent.reviewAndCorrectSolution(rawSol, {
+      questionText: content,
+      title: context || "حل مفصل للمسألة",
+      generatorModel: "gemini-3.8-flash"
+    });
   } catch (error) {
     console.error("Error generating detailed solution:", error);
     throw error;
@@ -1891,8 +2035,14 @@ Return a STRICT JSON object:
     });
 
     const result = cleanJson(response.text);
+    const rawSol = Array.isArray(result) ? result.map(r => r.solution).join('\n\n') : (result.solution || '');
+    const auditedSol = await correctionAgent.reviewAndCorrectSolution(rawSol, {
+      questionText: `${questionText}\n${subQuestions.join('\n')}`,
+      title: "حل مسألة مخصصة",
+      generatorModel: "gemini-3.8-flash"
+    });
     return {
-        solution: Array.isArray(result) ? result.map(r => r.solution).join('\n\n') : result.solution,
+        solution: auditedSol,
         solutionSvgCode: Array.isArray(result) ? result.find(r => r.solutionSvgCode)?.solutionSvgCode : result.solutionSvgCode
     };
 }
@@ -1936,17 +2086,22 @@ export async function solveAndSaveExercise(exerciseId: number): Promise<void> {
 
     const solutions = cleanJson(response.text || "[]");
     
-    const updatedSubQuestions = (exercise.subQuestions || []).map(sq => {
+    const updatedSubQuestions = await Promise.all((exercise.subQuestions || []).map(async (sq) => {
       const sol = solutions.find((s: any) => String(s.id) === String(sq.id));
       if (sol) {
+        const audited = await correctionAgent.reviewAndCorrectSolution(sol.solution || '', {
+          questionText: `${exercise.mainText}\n${sq.text}`,
+          title: `حل طلب ${sq.id}`,
+          generatorModel: "gemini-3.8-flash"
+        });
         return {
           ...sq,
-          solution: sol.solution,
+          solution: audited,
           solutionSvgCode: sol.solutionSvgCode || sq.solutionSvgCode
         };
       }
       return sq;
-    });
+    }));
 
     await db.exercises.update(exerciseId, {
       subQuestions: updatedSubQuestions
@@ -1978,12 +2133,12 @@ ${SOLVING_PROMPT}
 المستوى المطلوب للحل:
 ${modeInstruction}
 
-بالإضافة إلى حل كل طلب من الطلبات الفرعية، يجب عليك صياغة حقل إضافي يسمى "strategyText" يمثل "فكرة واستراتيجية الحل السريعة" للمسألة أو التمرين بشكل عام.
-تكون فكرة واستراتيجية الحل السريعة عبارة عن سطرين أو ثلاثة أسطر تشرح المفهوم الأساسي أو الفكرة الذكية لحل مثل هذه المسائل بطريقة سريعة ومختصرة للطلاب.
+بالإضافة إلى حل كل طلب من الطلبات الفرعية، يجب عليك صياغة حقل إضافي يسمى "strategyText" يمثل "💡 فكرة واستراتيجية الحل":
+- ضابط صياغة الاستراتيجية (strategyText): اكتب الفكرة العامة للتمرين وطريقة الحل بشكل موجز ومكثف (سطران إلى 4 أسطر فقط)، وليس شرحاً كاملاً أو تفصيلياً لكافة الطلبات؛ لأن تفصيل خطوات كل طلب مكانه الحصري هو مصفوفة حلول الطلبات (solutions).
 
 يرجى إرجاع النتيجة ككائن JSON ملتزم تماماً بالبنية التالية:
 {
-  "strategyText": "نص استراتيجية وفكرة الحل السريعة باللغة العربية الفصحى مع استخدام الرموز الرياضية المحاطة بـ $ عند اللزوم",
+  "strategyText": "الفكرة العامة للتمرين وطريقة الحل بشكل موجز ومكثف بدون شرح كامل لكافة الطلبات",
   "solutions": [
     {
       "id": "معرف الطلب الفرعي المطابق تماماً لما تم إرساله",
@@ -2319,81 +2474,92 @@ ${pdfContent ? `المرجع المدرسي المعتمد للمطابقة ال
     }
   });
 
-  return cleanJson(response.text);
+  const parsed = cleanJson(response.text);
+  if (parsed?.suggestedFix?.solution) {
+    parsed.suggestedFix.solution = await correctionAgent.reviewAndCorrectSolution(
+      parsed.suggestedFix.solution,
+      {
+        questionText: parsed.suggestedFix.question || item?.question,
+        title: "حل سؤال بنك الأسئلة (تدقيق وتصحيح)",
+        generatorModel: "gemini-3.8-flash"
+      }
+    );
+  }
+  return parsed;
+}
+
+export interface TestReviewIssue {
+  id: string;
+  category: string;
+  description: string;
+  fixSuggestion: string;
+  sectionIndex?: number;
+  questionIndex?: number;
+  targetField?: 'text' | 'solution' | 'options' | 'subQuestions';
+  optionIndex?: number;
+  subQuestionIndex?: number;
+  correctedValue?: string | string[];
 }
 
 export async function reviewTest(
   title: string,
   testData: any,
   userRecommendations?: string
-): Promise<{ reportMarkdown: string; issues: any[] }> {
+): Promise<{ reportMarkdown: string; issues: TestReviewIssue[] }> {
+  const rawSections = testData?.sections || (Array.isArray(testData) ? testData : []);
+  const cleanTestData = {
+    title: testData?.title || title,
+    sections: rawSections
+  };
+
   const prompt = `
-أنت مدقق علمي، إملائي، لغوي، وتربوي رائد ومتخصص في تدقيق المناهج الدراسية العربية الرسمية وتنسيق الرياضيات في LaTeX.
+أنت مدقق علمي، إملائي، لغوي، وتربوي رائد ومتخصص في تدقيق المناهج الدراسية العربية الرسمية (المنهاج السوري للرياضيات للثالث الثانوي العلمي) وتنسيق الرياضيات في LaTeX ومطابقة سلم التصحيح المعتمد.
 مهمتك الأساسية هي إجراء مراجعة فورية وعميقة لمحتوى الاختبار والطلبات والحل النموذجي من الناحية الرياضية والعلمية واللغوية ومظهر رموز LaTeX.
+
+القواعد المنهجية والرياضية الصارمة:
+1. صياغة LaTeX: إحاطة الرموز والمعادلات بإشارات دولار مفردة $...$ حصراً، ويمنع منعاً باتاً استخدام $$...$$.
+2. المصطلحات: استخدام مصطلح "تابع" وتوابعه حصراً، ومنع استخدام مصطلح "دالة".
+3. متجهات وأشعة: شعاع بين نقطتين (حرفين) يُكتب $\\overrightarrow{AB}$، وشعاع بحرف واحد يُكتب $\\vec{u}$.
+4. الدقة العلمية: التحقق من الحسابات وسلم التصحيح بنسبة 100%.
 
 عنوان الاختبار: ${title}
 محتوى كود الاختبار المراد فحصه بالكامل:
-${JSON.stringify(testData, null, 2)}
+${JSON.stringify(cleanTestData, null, 2)}
 
 ${userRecommendations ? `توصيات المستخدم المحددة للتدقيق (يجب التحقق من تلبيتها بدقة وترتيب المراجعة مع مراعاتها):\n"${userRecommendations}"\n` : ''}
 
 الرجاء القيام بـ:
 1. تقديم تقرير مراجعة شامل وعميق بتنسيق Markdown باللغة العربية يوضح مواطن القوة وأي خلل أو تحسينات مقترحة.
-2. استخراج قائمة بالأخطاء المحددة التي يمكن إصلاحها برمجياً.
+2. استخراج قائمة دقيقة بالأخطاء المحددة التي يمكن إصلاحها وتطبيقها برمجياً.
 
-التقرير يجب أن يتضمن:
-- التحقق من الدقة العلمية والحلول وحل المسائل.
-- كتابة وتنسيق رموز LaTeX وصحتها وعاملي تداخلها مع النص العربي.
-- مدى مطابقة الأسئلة مع توصيات المستخدم المحددة إن وجدت.
-
-قائمة الأخطاء (issues) يجب أن تكون مصفوفة من الكائنات، كل كائن يحتوي على:
-- id: معرف فريد للخطأ.
-- category: فئة الخطأ (علمي، مطبعي، تنسيق، توصيات المستخدم، إلخ).
-- description: وصف دقيق للخطأ ومكانه.
-- fixSuggestion: اقتراح الإصلاح المناسب لتعديل حقول الاختبار.
+لكل خطأ في مصفوفة (issues)، يجب تحديد موقعه الدقيق في هيكل الاختبار لتطبيق الإصلاح البرمجي التلقائي:
+- id: معرف فريد للخطأ (مثل "issue-1", "issue-2").
+- category: فئة الخطأ ("علمي", "تنسيق", "لغوي", "توصيات المستخدم").
+- description: وصف دقيق وواضح للخطأ ومكانه.
+- fixSuggestion: ملخص مقترح التصحيح باللغة العربية.
+- sectionIndex: رقم الفهرس (0, 1, 2, ...) للقسم في مصفوفة sections حيث يوجد الخطأ.
+- questionIndex: رقم الفهرس (0, 1, 2, ...) للسؤال في مصفوفة questions التابعة للقسم.
+- targetField: الحقل المراد تصحيحه ("text" لنص السؤال، "solution" لسلم الحل، "options" للخيارات، "subQuestions" للطلبات الفرعية).
+- optionIndex: رقم الخيار (0, 1, 2, 3) إذا كان الخطأ في خيار محدد (اختياري).
+- subQuestionIndex: رقم الطلب الفرعي (0, 1, 2, ...) إذا كان الخطأ في طلب محدد (اختياري).
+- correctedValue: القيمة المصححة والنهائية الجاهزة للاستبدال الفوري (سواء كنص string كامل بالـ LaTeX السليم أو كمصفوفة نصوص).
 
 أخرج النتيجة بصيغة JSON حصراً كالتالي:
 {
   "reportMarkdown": "تقرير المراجعة بالتفصيل هنا...",
   "issues": [
-    { "id": "1", "category": "علمي", "description": "توضيح الخطأ هنا...", "fixSuggestion": "التصحيح المقترح هنا..." }
+    {
+      "id": "issue-1",
+      "category": "علمي",
+      "description": "خطأ في إشارة المشتق في حل السؤال الأول",
+      "fixSuggestion": "تصحيح الإشارة والناتج النهائي في الحل النموذجي",
+      "sectionIndex": 0,
+      "questionIndex": 0,
+      "targetField": "solution",
+      "correctedValue": "الحل النموذجي المصحح كاملاً هنا مع LaTeX الصحيح..."
+    }
   ]
 }
-`;
-
-  const response = await generateWithFallback(MODELS_FALLBACK, {
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    config: { 
-      temperature: 0.1,
-      responseMimeType: "application/json"
-    }
-  });
-
-  const result = cleanJson(response.text);
-  return {
-    reportMarkdown: result.reportMarkdown || "فشلت عملية المراجعة.",
-    issues: result.issues || []
-  };
-}
-
-export async function applyFixesToTest(testData: any, selectedIssues: any[]): Promise<any> {
-  const prompt = `
-أنت خبير في معالجة البيانات التربوية.
-مهمتك هي تطبيق قائمة محددة من "الإصلاحات" على بيانات الاختبار (testData) المقدمة.
-
-بيانات الاختبار الأصلية:
-${JSON.stringify(testData, null, 2)}
-
-الإصلاحات المطلوب تطبيقها:
-${JSON.stringify(selectedIssues, null, 2)}
-
-التعليمات:
-1. قم بتعديل testData لتنفيذ هذه الإصلاحات بدقة.
-2. لا تقم بأي تعديلات أخرى غير تلك المطلوبة في قائمة الإصلاحات.
-3. حافظ على نفس هيكل الـ JSON تماماً.
-4. أخرج الـ JSON الجديد المحدث فقط.
-
-أخرج النتيجة بصيغة JSON المحدثة للاختبار.
 `;
 
   const response = await generateWithFallback(MODELS_FALLBACK, {
@@ -2404,7 +2570,143 @@ ${JSON.stringify(selectedIssues, null, 2)}
     }
   });
 
-  return cleanJson(response.text);
+  const result = cleanJson(response.text);
+  return {
+    reportMarkdown: result?.reportMarkdown || "تمت المراجعة بنجاح.",
+    issues: Array.isArray(result?.issues) ? result.issues : []
+  };
+}
+
+export async function applyFixesToTest(testData: any, selectedIssues: any[]): Promise<any> {
+  if (!testData) return testData;
+
+  // 1. Normalize input testData structure
+  let normalizedData = JSON.parse(JSON.stringify(testData));
+  if (normalizedData.testData && Array.isArray(normalizedData.testData.sections)) {
+    normalizedData = normalizedData.testData;
+  }
+  if (!Array.isArray(normalizedData.sections)) {
+    normalizedData.sections = [];
+  }
+
+  const unhandledIssues: any[] = [];
+
+  // 2. Phase 1: High-precision deterministic in-memory fixes for structured issues
+  for (const issue of selectedIssues) {
+    let applied = false;
+    const { sectionIndex, questionIndex, targetField, correctedValue, optionIndex, subQuestionIndex } = issue;
+
+    if (
+      typeof sectionIndex === 'number' &&
+      typeof questionIndex === 'number' &&
+      targetField &&
+      correctedValue !== undefined &&
+      normalizedData.sections[sectionIndex]?.questions?.[questionIndex]
+    ) {
+      const q = normalizedData.sections[sectionIndex].questions[questionIndex];
+
+      if (targetField === 'text' && typeof correctedValue === 'string') {
+        q.text = correctedValue;
+        applied = true;
+      } else if (targetField === 'solution' && typeof correctedValue === 'string') {
+        q.solution = correctedValue;
+        applied = true;
+      } else if (targetField === 'options') {
+        if (Array.isArray(correctedValue)) {
+          q.options = correctedValue;
+          applied = true;
+        } else if (typeof optionIndex === 'number' && typeof correctedValue === 'string' && Array.isArray(q.options)) {
+          q.options[optionIndex] = correctedValue;
+          applied = true;
+        }
+      } else if (targetField === 'subQuestions') {
+        if (Array.isArray(correctedValue)) {
+          q.subQuestions = correctedValue;
+          applied = true;
+        } else if (typeof subQuestionIndex === 'number' && typeof correctedValue === 'string' && Array.isArray(q.subQuestions)) {
+          q.subQuestions[subQuestionIndex] = correctedValue;
+          applied = true;
+        }
+      }
+    }
+
+    if (!applied) {
+      unhandledIssues.push(issue);
+    }
+  }
+
+  // If all issues were handled deterministically, return immediately (fast and 100% accurate!)
+  if (unhandledIssues.length === 0) {
+    return normalizedData;
+  }
+
+  // 3. Phase 2: Targeted LLM fallback for any unstructured or complex issues
+  try {
+    const prompt = `
+أنت خبير في تدقيق وتعديل اختبارات الرياضيات للمنهاج السوري.
+مهمتك هي تطبيق قائمة الإصلاحات التالية على بيانات الاختبار وإرجاع كائن الاختبار بعد التعديل بدقة متناهية.
+
+بيانات الاختبار الحالية:
+${JSON.stringify(normalizedData, null, 2)}
+
+قائمة الإصلاحات المطلوب تطبيقها:
+${JSON.stringify(unhandledIssues, null, 2)}
+
+التعليمات الصارمة:
+1. طبق كافة التعديلات المطلوبة بدقة مع الالتزام بقواعد المنهاج السوري وLaTeX بـ $...$ المفردة.
+2. حافظ على بنية الاختبار كاملة وجميع الأقسام والأسئلة ورموز SVG وخصائص كل سؤال (svgCode, solutionSvgCode, points, order).
+3. أرجع كائناً بصيغة JSON يحتوي على خاصية "sections" تحوي الأقسام والأسئلة المحدثة.
+
+أخرج النتيجة بصيغة JSON حصراً:
+{
+  "sections": [ ... الأقسام المحدثة ... ]
+}
+`;
+
+    const response = await generateWithFallback(MODELS_FALLBACK, {
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: { 
+        temperature: 0.1, 
+        responseMimeType: "application/json" 
+      }
+    });
+
+    const parsed = cleanJson(response.text);
+    let updatedSections: any[] | null = null;
+
+    if (parsed && Array.isArray(parsed.sections) && parsed.sections.length > 0) {
+      updatedSections = parsed.sections;
+    } else if (parsed && parsed.testData && Array.isArray(parsed.testData.sections)) {
+      updatedSections = parsed.testData.sections;
+    } else if (Array.isArray(parsed) && parsed.length > 0) {
+      updatedSections = parsed;
+    }
+
+    if (updatedSections && updatedSections.length > 0) {
+      // Merge while safely preserving any media / SVGs / metadata from previous state
+      normalizedData.sections = updatedSections.map((sec: any, sIdx: number) => {
+        const origSec = normalizedData.sections[sIdx] || {};
+        return {
+          ...origSec,
+          ...sec,
+          questions: (sec.questions || []).map((q: any, qIdx: number) => {
+            const origQ = origSec.questions?.[qIdx] || {};
+            return {
+              ...origQ,
+              ...q,
+              svgCode: q.svgCode || origQ.svgCode || undefined,
+              solutionSvgCode: q.solutionSvgCode || origQ.solutionSvgCode || undefined,
+            };
+          })
+        };
+      });
+    }
+  } catch (err) {
+    console.error("Error in LLM fallback of applyFixesToTest:", err);
+    // Even if LLM fails, normalizedData with Phase 1 deterministic fixes is preserved and returned
+  }
+
+  return normalizedData;
 }
 
 export interface TextBlock {
@@ -2561,13 +2863,20 @@ export async function generateLessonSummary(
   let titlesInstruction = '';
   if (originalTitles && originalTitles.length > 0) {
     titlesInstruction = `
-CRITICAL TITLES REQUIREMENT:
-You MUST create exactly ${originalTitles.length} sections in the Lesson Notebook matching these exact sequential headings (Do NOT drop or abbreviate any, keeping structural alignment absolute):
+REFERENCE TOPIC HEADINGS & STRUCTURAL MAPPING:
+The reference document contains these sequential topics/headings:
 ${originalTitles.map((t, idx) => `${idx + 1}. "${t}"`).join('\n')}
+
+COMPREHENSIVE EXTRACTION MANDATE:
+- You MUST exhaustively extract ALL concepts, definitions, theorems, and mathematical properties for every topic without omitting any idea.
+- For each theoretical lesson, create a comprehensive theoretical section ("isPracticeOnly": false) with in-depth explanations, notes, traps, exam guidance, SVG diagrams, and examples.
+- IMMEDIATELY follow each theoretical lesson with a dedicated practice lesson ("isPracticeOnly": true) containing ALL "تدرّب" (practice exercises and activities) related to that topic from the reference, with full questions in LaTeX and complete step-by-step solutions.
 `;
   } else {
     titlesInstruction = `
-Generate a fully sequenced set of chapters covering all distinct headers, definitions, and theorems of the reference text without truncation.
+COMPREHENSIVE EXTRACTION MANDATE:
+- You MUST systematically and exhaustively extract ALL concepts, theoretical lessons, and all "تدرّب" (practice exercises, activities, and problems) found in the reference document from beginning to end without any omissions or truncation.
+- For each theoretical lesson, create a theoretical section ("isPracticeOnly": false) followed immediately by a dedicated practice section ("isPracticeOnly": true) for all "تدرّب" exercises related to that lesson.
 `;
   }
 
@@ -2597,7 +2906,17 @@ ${pdfContent.substring(0, 75000)}
   });
 
   const text = response.text || "{}";
-  return cleanJson(text);
+  const parsed = cleanJson(text);
+  if (parsed && Array.isArray(parsed.sections)) {
+    parsed.sections = await Promise.all(parsed.sections.map(async (sec: any) => {
+      return await correctionAgent.reviewAndCorrectLesson(sec, {
+        title: sec.title || config.title,
+        unit: config.unit,
+        generatorModel: "gemini-3.8-flash"
+      });
+    }));
+  }
+  return parsed;
 }
 
 export async function regenerateSummarySectionAI(
@@ -2612,13 +2931,15 @@ CRITICAL VISUAL & PEDAGOGICAL MANDATES (شروط التنسيق والجودة �
    - لا تضع عدة مفاهيم رياضية أو حالات أو تعاريف في كتلة نصية متصلة واحدة أبداً لأن هذا يشتت ذهن الطالب.
    - ضع كل مفهوم، فكرة، تعريف، مبرهنة، أو حالة خاصة في فقرة مستقلة تماماً ومفصولة بتباعد أسطر واضح (\\n\\n).
    
-2. **إبراز بداية السطر بخط عريض واضح**:
-   - يجب إجبارياً البدء في أول الفقرة مباشرة بعنوان عريض مميز يسبقه أيقونة مناسبة دالة، مثل:
-     * **📍 تعريف [المفهوم]:** شرح المفهوم هنا...
-     * **🔸 مبرهنة [المبرهنة]:** التفصيل بالتكامل مع LaTeX...
-     * **🔹 قاعدة ذهبية [القاعدة]:** القانون الشامل...
-     * **💡 تنبيه تربوي فائق:** ملاحظة الامتحانات...
-   - يمنع البدء بكلمات عادية مسترسلة من دون تمييز المفهوم بخط عريض واضح في بداية أول سطر.
+2. **وسوم العناوين وتظليل الكلمات المفتاحية بدقة مطلقة**:
+   - العناوين الرئيسية دائماً باللون الأحمر: \`<main-title>العنوان الرئيسي</main-title>\` أو \*العنوان الرئيسي باللون الأحمر\*.
+   - العناوين الفرعية وتفريعات الفقرات دائماً باللون الأزرق: \`<sub-title>العنوان الفرعي</sub-title>\` أو \*\#العنوان الفرعي باللون الأزرق\#\* مسبوقاً بأيقونة مناسبة مثل:
+     * \*#📍 تعريف [المفهوم]:#\* شرح المفهوم هنا...
+     * \*#🔸 مبرهنة [المبرهنة]:#\* التفصيل بالتكامل مع LaTeX...
+     * \*#🔹 قاعدة ذهبية [القاعدة]:#\* القانون الشامل...
+     * \*#💡 تنبيه تربوي فائق:#\* ملاحظة الامتحانات...
+   - **الوسم \*\*عبارة\*\* (تظليل بلون بنفسجي فاتح وبدون إطار)**: يُمنع منعاً باتاً استخدام الوسم **عبارة** كعنوان فقرة، وفقط يُستخدم ضمن الشرح في حال نريد تظليل كلمة أو مفهوم هام، وتكون العبارة بين **عبارة** بلون بنفسجي فاتح وبدون إطار نهائياً.
+   - القوانين والدساتير والمبرهنات العامة ضمن إطار أحمر: \`***دستور أو قانون: $...$***\` أو \`<law>$...$</law>\`.
 
 3. **الترقيم الدائري السلس**:
    - استخدم الأرقام الدائرية المغلقة ①، ②، ③... لفرز وترقيم خطوات الحلول بدلاً من الترقيم العادي أو الكتابي لزيادة الفخامة والوضوح.
@@ -2663,7 +2984,11 @@ ${JSON.stringify(sectionData, null, 2)}
   });
 
   const text = response.text || "{}";
-  return cleanJson(text);
+  const parsed = cleanJson(text);
+  return await correctionAgent.reviewAndCorrectLesson(parsed, {
+    title: sectionData?.title || "تعديل فقرة",
+    generatorModel: "gemini-3.8-flash"
+  });
 }
 
 export async function regenerateSingleFieldAI(
@@ -2744,7 +3069,8 @@ Return ONLY the updated text. Do NOT add markdown wrappers, JSON formatting, con
   if (text.startsWith("```")) {
     text = text.replace(/^```[a-zA-Z]*\n/, "").replace(/\n```$/, "").trim();
   }
-  return isSvg ? cleanAndEnforceMathSvg(text) : text.trim();
+  const cleaned = isSvg ? cleanAndEnforceMathSvg(text) : text.trim();
+  return isSvg ? cleaned : await correctionAgent.reviewAndCorrectText(cleaned, { title: sectionTitle, generatorModel: "gemini-3.8-flash" });
 }
 
 
@@ -2836,48 +3162,71 @@ ${instruction}
 
 const SOLVE_PAST_PAPER_PROMPT = `
 You are an expert mathematical educator, solver, and curriculum consultant for the Syrian/Arab curriculum (particularly the Scientific Baccalaureate / Third Secondary Scientific).
-Your task is to analyze the provided test sheet or text of a past exam, extract every question, digitize/render each question with high-quality LaTeX and elegant Arabic, and solve every single question with a comprehensive, step-by-step mathematical solution.
+Your task is to analyze the provided test sheet or text/images of a past exam, extract every question, digitize/render each question with high-quality LaTeX and elegant Arabic, and solve every single question with a comprehensive, step-by-step mathematical solution.
 
-STRICT CONSTRAINTS & RULES:
-1. **Curriculum terminology**: Absolutely ban the word "دالة" (and its derivatives). You MUST strictly replace it with "تابع" (and its derivatives).
-2. **Strict Math Formatting (LaTeX)**: EVERY single mathematical variable, equation, or number MUST be wrapped in a single '$' symbol (e.g., $x$ or $f(x)=y$). NEVER output double dollar '$$' markers, as they break the RTL Arabic text layout and cause serious layout defects in the rendering library.
-3. **Arabic Text & LaTeX Delimiters ($) Rule**:
-   - Do NOT wrap ordinary Arabic words, sentence fragments, or instructions inside math delimiters '$ ... $'.
-   - ONLY wrap the actual mathematical symbols, variables, formulas, equations, or numbers themselves in '$'.
-   - For example, write: "مستقيم يمر بالنقطة $A(2i)$ ويميل بزاوية $\\frac{\\pi}{4}$"
-   - NEVER write: "$مستقيم يمر بالنقطة A(2i) ويميل بزاوية \\frac{\\pi}{4}$"
-   - Ensure that Arabic linking text/conjunctions (like 'أو', 'فإن', 'إذاً', 'حيث', 'يمر بـ') are strictly outside the '$' signs.
-   - **Vector Formatting Rules (CRITICAL)**: When formatting vectors in LaTeX, you MUST strictly differentiate between:
-     * A vector with a beginning and an end (two letters): write it in the form '\\overrightarrow{AB}' (e.g., $\\overrightarrow{AB}$).
-     * A vector represented by a single letter: write it in the form '\\vec{u}' (e.g., $\\vec{u}$).
-4. **Original Numbering**: Preserve the layout and sequential numbering of questions in the source (e.g. "السؤال الأول", "ثانياً").
-5. **Circled Step Numbers**: In the "solution" text of essay/writing questions, you MUST number the steps or answers to sub-questions using circled numbers like ①, ②, ③, ④, ⑤. Do NOT write "الطلب الأول:" or "1-". Use circled numbers. Each step should be on a new line and separated by a double newline (\\\\n\\\\n) for clean vertical spacing.
-6. **No Literal Newlines in Strings**: This is a critical JSON rule. Use \\\\n for line breaks inside text fields, never output literal unescaped newlines in the JSON values.
-7. **Graphic SVGs / Tables**:
-   - If a question asks to raw drawing, graphing, or geometric representations, or contains a table of variation, you MUST generate high-fidelity SVG code.
-     * Use large bold black text in SVGs (font-weight: "bold", fill: "#000000", font-size: 20px+).
-     * Add a solid white background rect to the SVG to ensure visibility in dark mode: \`<rect width="100%" height="100%" fill="#ffffff" />\`.
-     * Return this in "solutionSvgCode" (for solutions) or "svgCode" (if part of question text).
-   - If there is a variation table, you may render it either as LaTeX \\begin{array} in text or generate an SVG. Under RTL Arabic layout, a well-formed LaTeX array inside '$ ... $' is preferred, but SVGs are also highly welcome.
+========================================================================================
+🚨 قرار صارم ومطلق لا يقبل التجاوز قطعيّاً (STRICT ABSOLUTE ZERO-MODIFICATION DIRECTIVE) 🚨
+========================================================================================
+"في قسم الدورات الامتحانية وعند تحميل ملف PDF واستخراج النص: يُمنع منعاً باتاً وصارماً التصرف بصيغة السؤال، تبقى كما هي تماماً دون زيادة أو نقصان. قرار صارم."
+
+1. **النقل الحرفي الصارم 100% لصيغة السؤال دون أي تصرف أو زيادة أو نقصان (Verbatim Zero-Modification Rule)**:
+   - **يُمنع منعاً باتاً وصارماً وبأي شكل من الأشكال** التصرف بصيغة السؤال أو تعديل كلماتها أو إعادة صياغتها أو تبديل مفرداتها أو اختصارها أو إطالتها أو تغيير أي رقم أو حرف أو رمز فيها!
+   - **تبقى صيغة السؤال كما هي تماماً حرفياً دون زيادة أو نقصان بنسبة 100%**.
+   - حقل "question" يجب أن يحتوي حصراً وفقط على نص السؤال كما ورد في الامتحان الرسمي دون أي مقدمات أو زيادات (يُمنع منعاً باتاً كتابة مقدمات مثل: "نص السؤال:" أو "في هذا التمرين المطلوب..." أو "المسألة هي:...").
+   - حظر تغيير أفعال وصيغ الطلبات الامتحانية إطلاقاً: إذا ورد في ورقة الامتحان الأصلية "احسب" يُمنع كتابة "أوجد"، وإذا ورد "بيّن أن" يُمنع كتابة "أثبت أن"، وإذا ورد "استنتج" يُمنع استبدالها بغيرها. انقل الصيغة الرسمية حرفياً.
+   - إذا كان السؤال اختياراً من متعدد (MCQ)، يجب نقل نص السؤال وخياراته الأربعة (أ، ب، ج، د) نصياً كما وردت تماماً دون المساس بصيغها.
+   - إذا كان السؤال يتضمن عدة طلبات فرعية (1, 2, 3...)، تُنقل نصوص الطلبات وأرقامها أو حروفها تماماً كما هي في ورقة الامتحان الأصلية دون دمج أو تفريق أو إعادة صياغة.
+   - الرموز والمعادلات الرياضية فقط تُكتب بصيغة LaTeX القياسية داخل رمزي دولار مفردين $ ... $ مع الحفاظ التام على أرقامها ومتغيراتها الأصلية دون أي تغيير.
+
+2. **كتابة اسم وترتيب السؤال كما هو تماماً في ورقة الامتحان (Exact Question Title & Order)**:
+   - **يجب كتابة اسم وترتيب السؤال تماماً وبدقة متناهية كما هو مذكور في نموذج الـ PDF الأصلي**:
+     * صيغة الأسئلة: (السؤال الأول، السؤال الثاني، السؤال الثالث، السؤال الرابع، السؤال الخامس، السؤال السادس... إلخ).
+     * صيغة التمارين: (التمرين الأول، التمرين الثاني، التمرين الثالث، التمرين الرابع، التمرين الخامس، التمرين السادس... إلخ).
+     * صيغة المسائل: (المسألة الأولى، المسألة الثانية، المسألة الثالثة، المسألة الرابعة... إلخ).
+     * الأقسام الترويسية: (أولاً: أجب عن السؤالين الآتيين، ثانياً: حل التمارين الأربعة الآتية، ثالثاً: حل المسألتين الآتيتين... إلخ).
+   - ضع هذه التسمية الترتيبية الدقيقة في حقل "orderTitle" دون أي تغيير.
+
+3. **Existing Solution Preservation (إذا كان الحل موجوداً يكتب كما هو)**:
+   - إذا كان نموذج الامتحان أو ملف الـ PDF المرفق يتضمن الحل الرسمي أو سلم التصحيح أو إجابات الأسئلة، فيجب عليك كتابة الحل كما هو تماماً في النموذج دون اختراع أو استبدال أو اختصار، مع صياغته بدقة بـ LaTeX وترقيم خطواته بالأرقام الدائرية ①، ②، ③...
+   - فقط في حال لم يكن الحل متوفراً في نص الـ PDF المرفق، تقوم بحل المسألة حلاً رياضياً تفصيلياً كاملاً بنسبة 100% بخطوات منطقية وسليمة.
+
+4. **Question Illustration SVG Generation (رسم توضيحي مناسب تماماً في حاوية السؤال)**:
+   - إذا كان أحد الأسئلة أو المسائل في نموذج الامتحان مضافاً إليه رسم توضيحي أو شكل هندسي (مثل: مثلث، هرم، مكعب، متوازي مستطيلات، دائرة، خط بياني لتابع، أشعة، جملة مقارن، أو جدول تغيرات مرسوم)، فيجب عليك توليد كود SVG دقيق واحترافي يطابق الرسم التوضيحي الأصلي تماماً، ووضعه في حقل "svgCode" الخاص بالسؤال نفسه ليظهر مباشرة داخل حاوية السؤال.
+   - مواصفات الـ SVG:
+     * استخدام viewBox مناسب (مثلاً viewBox="0 0 500 350") مع أبعاد متجاوبة width="100%" height="auto".
+     * خطوط وألوان واضحة وتسميات رؤوس ونقاط بارزة (font-weight="bold", font-size="16px" إلى "20px").
+     * خلفية بيضاء نقية <rect width="100%" height="100%" fill="#ffffff" rx="12"/> لضمان وضوحه التام في الطباعة والعرض.
+
+5. **Curriculum Terminology**: Absolutely ban the word "دالة" (and its derivatives). You MUST strictly replace it with "تابع" (and its derivatives).
+
+6. **Strict Math Formatting (LaTeX)**: EVERY single mathematical variable, equation, or number MUST be wrapped in a single '$' symbol (e.g., $x$ or $f(x)=y$). NEVER output double dollar '$$' markers, as they break the RTL Arabic text layout.
+   - Do NOT wrap ordinary Arabic words or sentence fragments inside math delimiters '$ ... $'.
+   - ONLY wrap the actual mathematical symbols, variables, formulas, equations, or numbers in '$'.
+   - **Vector Formatting**: Two letters vector: '\\overrightarrow{AB}'. Single letter vector: '\\vec{u}'.
+
+7. **Circled Step Numbers in Solutions**: In the "solution" text, number steps or requests using circled numbers: ①, ②, ③, ④, ⑤. Main headings in red (*العنوان الرئيسي*), subheadings in blue (*#العنوان الفرعي#*), general laws in red border (***دستور***).
+
 8. **JSON Schema**: Return a strict, valid JSON object with:
-   - "title": Title of the exam (e.g. "دورة عام 2022 - الدورة الثانية")
+   - "title": Title of the exam (e.g. "دورة عام 2023 - الدورة الأولى")
    - "grade": Grade level
    - "subject": Subject name
    - "year": Year of the exam
    - "questions": An array of questions:
-     * "id": unique string ID (e.g., q1, q2_a)
-     * "topic": precise math topic (e.g., "نهاية تابع مثلثي")
+     * "id": unique string ID (e.g., "q1", "q2")
+     * "orderTitle": Exact question order heading from PDF (e.g. "السؤال الأول", "التمرين الأول", "المسألة الأولى")
+     * "topic": precise math topic (e.g., "نهاية تابع مثلثي", "هندسة فراغية")
      * "type": either "mcq" or "essay"
-     * "question": text of the question (must have proper LaTeX)
-     * "subParts": array of strings (options if mcq - prefixed with (أ), (ب), (ج), (د)), or sub-questions if essay (or empty array)
-     * "solution": detailed, step-by-step mathematical solution (with circled numbers and proper \\\\n\\\\n spacing)
-     * "svgCode": SVG string or empty
-     * "solutionSvgCode": SVG string or empty
+     * "question": EXACT VERBATIM text of the question from the exam paper (NO modifications, NO additions, NO omissions, proper LaTeX)
+     * "subParts": array of strings (options if mcq - prefixed with (أ), (ب), (ج), (د)), or exact sub-questions if essay
+     * "solution": detailed mathematical solution (as is from source if present, otherwise solved step-by-step)
+     * "svgCode": SVG string for question illustration if question has a diagram/drawing, otherwise empty string ""
+     * "solutionSvgCode": SVG string for solution variation table or graph if required, otherwise empty string ""
 `;
 
 export async function solvePastPaperAI(
   pdfContent: string,
-  config: { grade: string; subject: string; year: string; title: string }
+  config: { grade: string; subject: string; year: string; title: string },
+  base64Images?: string[]
 ): Promise<any> {
   const prompt = `
 ${SOLVE_PAST_PAPER_PROMPT}
@@ -2889,12 +3238,125 @@ USER SPECIFICATIONS:
 العنوان المختار للدورة: ${config.title}
 
 PAST EXAM REFERENCE TEXT (PDF / OCR DATA):
-${pdfContent.substring(0, 95000)}
+${pdfContent ? pdfContent.substring(0, 95000) : 'نصوص ورقة الامتحان مستخرجة من صفحات الـ PDF المرفقة كصور.'}
 
-Analyze the reference content, extract/formulate all math questions exactly (in professional educational Arabic with proper LaTex), solve everything with steps, and return a strict valid JSON matching the schema requested.
+CRITICAL EXECUTION MANDATE - VERBATIM EXTRACTION ONLY (قرار صارم ومطلق):
+1. Extract EVERY math question, exercise, and problem VERBATIM with 100% exact fidelity.
+2. It is STRICTLY FORBIDDEN to alter, paraphrase, rephrase, simplify, or reword the question text in any way.
+3. Keep the question wording exactly as written on the exam paper, without ANY addition or subtraction.
+4. Do NOT inject commentary or prefixes like "المطلوب:" or "نص السؤال:" into the question field.
+5. Solve every question with complete, rigorous mathematical steps, and return a strict valid JSON matching the schema requested.
 `;
 
-  console.log("Analyzing and Solving Past Exam Paper...");
+  console.log("Analyzing and Solving Past Exam Paper with Strict Verbatim Question Preservation...");
+
+  const imageParts = (base64Images || []).slice(0, 8).map((base64) => ({
+    inlineData: {
+      mimeType: "image/jpeg",
+      data: base64,
+    },
+  }));
+
+  const response = await generateWithFallback(MODELS_FALLBACK, {
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: prompt },
+          ...imageParts
+        ]
+      }
+    ],
+    config: {
+      temperature: 0.1,
+      responseMimeType: "application/json"
+    }
+  });
+
+  const parsed = cleanJson(response.text || "{}");
+  if (parsed && Array.isArray(parsed.questions)) {
+    parsed.questions = await Promise.all(parsed.questions.map(async (q: any) => {
+      if (q && q.solution) {
+        const auditedSol = await correctionAgent.reviewAndCorrectSolution(q.solution, {
+          questionText: q.questionText || q.title,
+          title: config.title || "دورة امتحانية",
+          generatorModel: "gemini-3.8-flash"
+        });
+        return {
+          ...q,
+          solution: auditedSol
+        };
+      }
+      return q;
+    }));
+  }
+  return parsed;
+}
+
+/**
+ * 🔍 Review and refine a past paper question solution (مراجعة الحل الرياضي والمنطقي - حل عادي غير مفصل جداً)
+ */
+export async function reviewPastPaperQuestionSolutionAI(
+  questionTitle: string,
+  questionText: string,
+  currentSolution: string,
+  subParts?: string[],
+  topic?: string
+): Promise<{
+  isCorrect: boolean;
+  notes: string;
+  reviewedSolution: string;
+}> {
+  const prompt = `
+أنت خبير تربوي فائق ومستشار بيداغوجي لمادة الرياضيات واللغة العربية وفق المنهاج السوري للشهادة الثانوية العامة (الثالث الثانوي العلمي).
+مهمتك الأساسية: مراجعة وتدقيق حل سؤال أو مسألة دورة امتحانية وزارية سابقة للتأكد من دقته وصحته الرياضية والمنطقية.
+
+طلب وتوجيه المستخدم الصارم:
+"مراجعة الحل (الخطوات المنطقية والرياضية الصحيحة للحل) لا أريد حلاً مفصلاً جداً، حل عادي."
+
+بيانات السؤال المطلوب مراجعته:
+- الترويسة / العنوان: "${questionTitle || 'سؤال امتحاني'}"
+- الموضوع: "${topic || 'عام'}"
+- نص السؤال كاملاً:
+"${questionText}"
+${subParts && subParts.length > 0 ? `- الخيارات أو البنود الفرعية:\n${subParts.map((p, i) => `  * ${p}`).join('\n')}` : ''}
+
+- الحل الحالي المسجل:
+"${currentSolution || 'لا يوجد حل مسجل حالياً'}"
+
+المعايير البيداغوجية والرياضية الإلزامية الصارمة:
+1. **الخطوات المنطقية والرياضية الصحيحة (صحة 100%)**:
+   - تحقق من صحة كافة العمليات الحسابية والجبرية وقوانين الاشتقاق، التكامل، الأشعة، الأعداد المركبة، المتتاليات، التحليل التوافقي، الاحتمالات، والهندسة الفراغية.
+   - صحح أي خطأ في الأرقام أو الحسابات أو الرموز أو الإشارات، واضمن صحة النتيجة النهائية 100%.
+
+2. **حل عادي وليس مفصلاً جداً (Normal Standard Solution)**:
+   - كما شدد المستخدم تماماً: لا تقدم حلاً مسهباً أو مطولاً بحشو فائض أو شرح عام بديهي، بل اكتب الحل المنهجي العادي المعتمد في سلالم تصحيح وزارة التربية السورية (خطوات مرتبة، منطقية، معللة رياضياً، ومباشرة بدون إطالة أو تعقيد).
+
+3. **الترقيم الدائري والوسوم والتنسيق البصري الإلزامي**:
+   - استخدام الأرقام الدائرية المغلقة ①، ②، ③... لفرز وترقيم خطوات الحل أو طلبات المسألة.
+   - العناوين الرئيسية باللون الأحمر: \*العنوان الرئيسي باللون الأحمر\* (مثال: \*حل الطلب الأول:\* ، \*دراسة تغيرات التابع:\*).
+   - العناوين الفرعية باللون الأزرق: \*\#العنوان الفرعي باللون الأزرق\#\* (مثال: \*\#حساب النهايات:\#\*، \*\#دراسة إشارة المشتق:\#\*).
+   - الوسم \*\*عبارة\*\* (تظليل بنفسجي فاتح وبدون إطار): يُمنع منعاً باتاً استخدامه كعنوان فقرة، وفقط يُستخدم ضمن الشرح لتظليل كلمة أو مفهوم هام، وتكون العبارة بلون بنفسجي فاتح وبدون إطار.
+   - القوانين والدساتير العامة ضمن إطار أحمر: \`***دستور عام أو قانون***\` (مثال: \`***شرط الاستمرار: $\lim_{x \to x_0} f(x) = f(x_0)$***\`).
+
+4. **معايير اللاتكس والمنهاج السوري**:
+   - كتابة كافة الرموز والمعادلات الرياضية بين محدد الدولار المفرد '$ ... $' حصراً، ويُمنع منعاً باتاً استخدام '$$'.
+   - يمنع حشو أي كلمات عربية داخل محددات اللاتكس '$...$'.
+   - صياغة الأشعة: \`\\vec{u}\` لحرف واحد، و \`\\overrightarrow{AB}\` لحرفين.
+   - استخدام مصطلح "تابع" وتوابعه حصراً، ومنع استخدام مصطلح "دالة".
+   - حظر الجداء الشعاعي الخارجي (الجداء المعتمد هو السلمي $\\vec{u} \\cdot \\vec{v}$).
+   - عدم استخدام رمز $\\sum$، وكتابة المجاميع بنقاط التتابع $\\cdots$.
+   - كتابة المجالات المفتوحة بالشكل $]a, b[$ والمغلقة $[a, b]$.
+
+أعد النتيجة حصراً بصيغة JSON صالحة بالهيكل التالي:
+{
+  "isCorrect": true,
+  "notes": "ملخص مركز وموجز لما تم تدقيقه والتأكد من صحته رياضياً ومنطقياً وفق المنهاج السوري",
+  "reviewedSolution": "نص الحل المراجع العادي والمنطقي والصحيح 100% مع الترقيم الدائري والوسوم الملونة"
+}
+`;
+
+  console.log("Reviewing Past Paper Question Solution with AI...");
   const response = await generateWithFallback(MODELS_FALLBACK, {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
     config: {
@@ -2924,40 +3386,51 @@ export async function generatePracticeExerciseSolutionAI(
 نص تمرين "تدرّب" المختار:
 "${questionText}"
 
-الرجاء توليد أو تحسين:
-1. فكرة الحل (استراتيجية الحل): شرح ذكي ومبسط لكيفية البدء بالتفكير وحل التمرين وتجاوز الصعوبة فيه باختصار وبساطة مركزاً على المفاهيم والقوانين الرياضية الأساسية.
-2. الحل النموذجي والتفصيلي الكامل لكافة طلبات التمرين: يوضع الحل كاملاً بدقة متناهية مع التقيد الصارم بالقواعد التنسيقية والوسوم المحددة أدناه.
+قواعد وضوابط إلزامية وصارمة لفصل فكرة واستراتيجية الحل عن خطوات الحل (CRITICAL SEPARATION RULES):
+1. 💡 فكرة واستراتيجية الحل توضع حصراً في الحاوية المخصصة لها (strategyText):
+   - **الهدف البيداغوجي**: تقديم تحليل تربوي وبيداغوجي ذكي ورفيع لنص المسألة ومعطياتها، يرشد عقل الطالب نحو مفاتيح التفكير، المهارات الرياضية، والقوانين الذهبية المطلوبة لحل التمرين دون حل الطلبات الحسابية التفصيلية.
+   - **عناصر الصياغة التربوية المحترفة**:
+     * قراءة المعطيات وتحديد الفكرة المحورية وخارطة الحل (مثال: الربط بين الهندسة التحليلية والشعاعية عبر معلم متجانس، أو استثمار خواص مركز الأبعاد المتناسبة لإثبات تلاقي المستقيمات، أو مناقشة اطراد وقيم حدية).
+     * تحديد المهارات والأدوات الرياضية الواجب استثمارها (مثل: تعيين إحداثيات، شرط الارتباط الخطي لأشعة التوجيه، إيجاد التمثيل الوسيطي لمستقيم، شرط تعامد شعاعين، دستور مركز الثقل).
+     * ترتيب خطوات التفكير المنهجي في نقاط موجزة (1. 2. 3. أو ① ② ③) ترشد الطالب لكيفية الانطلاق والتنفيذ، في 3 إلى 5 أسطر مركزة.
+     * تظليل المفاهيم الجوهرية والمهارات بـ **عبارة** (مثل **مركز الأبعاد المتناسبة**، **الارتباط الخطي**).
+   - **حظر صارم ومطلق لعبارات التوجيه الفوقية**: يُمنع منعاً باتاً كتابة عبارات التوجيه مثل: "العنوان الرئيسي باللون الأحمر" أو "العنوان الفرعي باللون الأزرق" أو "العنوان الرئيسي:" كنص معروض! إذا وُجد عنوان للاستراتيجية، يُكتب اسم العنوان الفعلي فقط بين نجمتين مفردتين (مثال: *استراتيجية الحل الهندسي في الفراغ*).
+
+2. 🔑 حاوية حل التمرين (solutionText):
+   - **حظر صارم ومطلق**: يُمنع منعاً باتاً وضع أو تكرار "فكرة واستراتيجية الحل" أو كتابة فقرة الاستراتيجية داخل نص الحل (solutionText)؛ لأن مكانها الحصري هو (strategyText).
+   - نص الحل (solutionText) مخصص حصراً لخطوات وإجابات وحلول الطلبات بالتفصيل، ويبدأ مباشرة بحل الطلبات بالترقيم الدائري (①, ②, ③...).
 
 قواعد وضوابط إلزامية وصارمة لتنسيق وكتابة الحل (MANDATORY FORMATTING & TAG RULES):
 1. العناوين الرئيسية باللون الأحمر (Main Headings in Red):
-   - يجب صياغة أي عنوان رئيسي في الحل باللون الأحمر باستخدام وسم النجمة المفردة: \`*العنوان الرئيسي باللون الأحمر*\`.
+   - يجب صياغة أي عنوان رئيسي في الحل باللون الأحمر بكتابة نص العنوان الفعلي فقط بين نجمتين مفردتين.
    - أمثلة:
      * \`*حل الطلب الأول:* \`
      * \`*دراسة تغيرات التابع والاطراد:* \`
      * \`*إيجاد معادلة المماس في النقطة المعطاة:* \`
+   - **تحذير**: يُمنع كتابة عبارة "العنوان الرئيسي باللون الأحمر" كنص!
 2. العناوين الفرعية باللون الأزرق (Subheadings in Blue):
-   - يجب صياغة أي عنوان فرعي أو خطوة فرعية باللون الأزرق باستخدام وسم النجمة والهاش: \`*#العنوان الفرعي باللون الأزرق#*\`.
+   - يجب صياغة أي عنوان فرعي أو خطوة فرعية باللون الأزرق بكتابة نص العنوان الفرعي الفعلي فقط بين نجمة وهاش.
    - أمثلة:
      * \`*#حساب النهايات عند أطراف مجموعة التعريف:#*\`
      * \`*#دراسة إشارة المشتق وتحديد القيم الحدية:#*\`
      * \`*#التعويض في معادلة المستقيم:#*\`
+   - **تحذير**: يُمنع كتابة عبارة "العنوان الفرعي باللون الأزرق" كنص!
 3. قانون عام ضمن إطار أحمر (General Law / Formula in Red Border):
    - يجب وضع أي قانون عام، دستور رياضي، قاعدة أساسية، أو مبرهنة معتمدة ضمن إطار أحمر محدد باستخدام وسوم الثلاث نجمات: \`***القانون العام أو الدستور***\`.
-   - في حال كان القانون يتضمن رموزاً أو معادلات بصيغة LaTeX، يجب إحاطتها بالدولار داخل النجمات الثلاث حصراً.
-   - أمثلة:
-     * \`***دستور مشتق جداء تابعين: $(u \\cdot v)' = u'v + uv'$***\`
-     * \`***دستور المسافة بين نقطتين في الفراغ: $AB = \\sqrt{(x_B-x_A)^2 + (y_B-y_A)^2 + (z_B-z_A)^2}$***\`
-     * \`***شرط تعامد مستقيمين: $\\vec{u} \\cdot \\vec{v} = 0$***\`
+   - في حال كان القانون يتضمن رموزاً أو معادلات بصيغة LaTeX، يجب إحاطتها بالدولار داخل النجمات الثلاث حصراً (مثال: \`***دستور مشتق جداء تابعين: $(u \\cdot v)' = u'v + uv'$***\`).
 4. الترقيم ورموز وصيغ الرياضيات (LaTeX & Mathematical Notation):
    - صياغة المعادلات والرموز الرياضية باستخدام LaTeX بمحدد مفرد '$ ... $' حصراً (مثال: $f(x) = x^2$). يمنع منعاً باتاً استخدام المحدد المزدوج '$$'.
    - تفريق الأشعة بدقة: المتجه بحرفين يكتب بالشكل \`\\overrightarrow{AB}\` والمتجه بحرف واحد يكتب \`\\vec{u}\`.
    - ترقيم خطوات وإجابات الطلبات بالرموز الدائرية المغلقة (①, ②, ③...).
    - يمنع استخدام كلمة "دالة" واستخدم دائماً كلمة "تابع".
+5. تظليل الكلمات والمفاهيم الهامة بلون بنفسجي فاتح وبدون إطار:
+   - استخدام وسم النجمتين \`**عبارة**\` فقط ضمن الشرح لتظليل كلمة أو مفهوم هام بلون بنفسجي فاتح وبدون إطار.
+   - **حظر تام**: يُمنع منعاً باتاً استخدام وسم \`**...**\` كعناوين للفقرات.
 
 أخرج النتيجة بصيغة JSON نظيفة ومطابقة للمخطط التالي تماماً بدون أي مقدمات أو هوامش خارج ملف الـ JSON:
 {
-  "strategyText": "فكرة الحل واستراتيجية التفكير المختصرة والذكية هنا",
-  "solutionText": "خطوات الحل النموذجي المفصل مع العناوين الرئيسية الحمراء والعناوين الفرعية الزرقاء والقوانين العامة ضمن إطار أحمر والترقيم الدائري"
+  "strategyText": "تحليل تربوي موجز لأفكار ومهارات وخارطة طريق الحل بدون أي عبارات توجيه مصطنعة",
+  "solutionText": "خطوات الحل النموذجي المفصل لكافة الطلبات بدون تكرار الاستراتيجية نهائياً"
 }
 `;
 
@@ -2975,14 +3448,95 @@ export async function generatePracticeExerciseSolutionAI(
   const text = response.text || "{}";
   const parsed = cleanJson(text);
 
-  // 2. التحقق العلمي والتدقيق الرياضي للحل الناتج
-  const validatedSol = globalOrchestrator.validateMathSolution(parsed.solutionText || "", sectionTitle);
-  const validatedStrat = globalOrchestrator.validateMathSolution(parsed.strategyText || "", `${sectionTitle} (استراتيجية)`);
+  // 2. الفصل الأولي الصارم لضمان عدم تسرب الاستراتيجية وتنظيف عبارات التوجيه
+  const preSeparated = separateStrategyAndSolution(
+    parsed.solutionText || "",
+    parsed.strategyText || ""
+  );
+
+  // 3. التحقق العلمي والتدقيق الرياضي للحل الناتج عبر الوكيل المُحكّم المستقل (correctionAgent)
+  const auditedSol = await correctionAgent.reviewAndCorrectSolution(preSeparated.cleanSolution, {
+    questionText,
+    title: sectionTitle,
+    generatorModel: "gemini-3.8-flash"
+  });
+  const validatedStrat = await correctionAgent.reviewAndCorrectText(preSeparated.cleanStrategy, {
+    title: `${sectionTitle} (استراتيجية)`,
+    generatorModel: "gemini-3.8-flash"
+  });
+
+  // 4. التدقيق والفصل النهائي التام
+  const finalSeparated = separateStrategyAndSolution(auditedSol, validatedStrat);
 
   return {
-    solutionText: validatedSol.text,
-    strategyText: validatedStrat.text
+    solutionText: finalSeparated.cleanSolution,
+    strategyText: finalSeparated.cleanStrategy
   };
+}
+
+/**
+ * صياغة أو إعادة صياغة "💡 فكرة واستراتيجية الحل" بالذكاء الاصطناعي بأسلوب تربوي احترافي وموجز
+ */
+export async function regenerateExerciseStrategyAI(
+  questionText: string,
+  solutionText?: string,
+  currentStrategy?: string,
+  sectionTitle?: string
+): Promise<string> {
+  const prompt = `
+أنت موجه تربوي أول وخبير في ديداكتيك وتدريس الرياضيات للمرحلة الثانوية (المنهاج السوري - الثالث الثانوي العلمي).
+مهمتك: صياغة أو إعادة صياغة "💡 فكرة واستراتيجية الحل" لتمرين/مسألة رياضيات بأسلوب تربوي وبيداغوجي رفيع المستوى، يحلل نص المسألة ويوجه تفكير الطالب نحو المفاتيح والمهارات الرياضية، ولكن بشكل موجز ومكثف جداً.
+
+نص المسألة:
+"""
+${questionText}
+"""
+${solutionText ? `الحل المعتمد للاستئناس به واستخلاص الأفكار والمهارات:\n"""\n${solutionText.slice(0, 2000)}\n"""\n` : ''}
+${currentStrategy ? `الصياغة السابقة المراد تطويرها وتنقيتها تربوياً:\n"""\n${currentStrategy}\n"""\n` : ''}
+
+الضوابط البيداغوجية والتحريرية الصارمة (PEDAGOGICAL & FORMATTING MANDATES):
+1. **التحليل التربوي للمسألة والمهارات المحورية (Pedagogical Skills & Concepts)**:
+   - ابدأ بفقرة تمهيدية مكثفة تحلل الفكرة المحورية للمسألة (مثال: الاستثمار الذكي لـ **خاصّة مركز الأبعاد المتناسبة** لإثبات تلاقي المستقيمات في الفراغ، أو الربط بين الخواص التحليلية والشعاعية عبر **معلم متجانس**، أو مناقشة **اطراد وقيم حدية**).
+   - حدد مهارات التفكير والأدوات الرياضية الواجب استثمارها (مثل: شروط مركز الأبعاد المتناسبة، شرط الارتباط الخطي لأشعة التوجيه، إيجاد التمثيل الوسيطي لمستقيم، شرط تعامد شعاعين، دستور مركز الثقل).
+   - رتب خطوات التفكير المنهجي في نقاط موجزة (1. 2. 3. أو ① ② ③) ترشد عقل الطالب لكيفية الانطلاق والتنفيذ، دون حل الحسابات التفصيلية والأرقام (لأن تفصيل كل طلب وحساباته مكانه الحصري في خطوات الحل).
+   - **نموذج تطبيقي معتمد للاقتداء به في الصياغة (Gold Standard Example)**:
+     "تعتمد استراتيجية الحل على الاستثمار الذكي لـ **خاصّة مركز الأبعاد المتناسبة** لإثبات تلاقي المستقيمات في الفراغ. **مثلاً:** لاثبات $(AB)$ و $(CD)$ متقاطعان نتبع مايلي:
+     1. نثبت أن نقطة ما (مثلاً $L$) هي مركز أبعاد متناسبة للنقطتين $A$ و $B$ بأوزان مناسبة. فتكون $L\\in (AB)$.
+     2. نثبت أن **$L$ نفسها** مركز الأبعاد المتناسبة للنقاط $C$ و $D$ بأوزان مناسبة ، فتكون $L\\in (CD)$.
+     3. من العلاقتين السابقتين نجد أن المستقيمين $(AB)$ و $(CD)$ متقاطعين في $L$."
+
+2. **حظر صارم ومطلق لعبارات التوجيه الفوقية (ABSOLUTE BAN ON META-DIRECTIVES)**:
+   - **يُمنع منعاً باتاً ومطلقاً** كتابة عبارات التوجيه مثل: "العنوان الرئيسي باللون الأحمر" أو "العنوان الفرعي باللون الأزرق" أو "العنوان الرئيسي:" أو "العنوان الفرعي:". هذه العبارات هي تعليمات نظام داخلية وليست نصاً يُعرض للطالب!
+   - إذا وضعت عنواناً فليكن نص العنوان الرياضي الفعلي فقط بين نجمتين مفردتين (مثال: *استراتيجية إثبات تلاقي المستقيمات في الفراغ*).
+
+3. **قواعد التنسيق والرموز (Formatting & LaTeX)**:
+   - استخدم وسم النجمتين \`**عبارة**\` حصراً لتظليل المفاهيم والمصطلحات والمهارات الجوهرية (مثال: **مركز الأبعاد المتناسبة**، **الارتباط الخطي**، **معلم متجانس**) لتظهر بظل بنفسجي أنيق وبدون إطار.
+   - استخدم صيغ LaTeX بمحدد الدولار المفرد \`$ ... $\` حصراً لكافة الرموز والمعادلات الرياضية (مثل $\\overrightarrow{AB}$، $\\vec{u}$، $f(x)$). يُمنع منعاً باتاً استخدام $$.
+   - استخدم كلمة "تابع" بدلاً من "دالة".
+   - الإيجاز التام: من 3 إلى 6 أسطر مركزة وشاملة لأفكار ومهارات الحل.
+
+أعد فقط نص "فكرة واستراتيجية الحل" مباشرة بدون أي مقدمات أو شروحات خارج النص.
+`;
+
+  const enrichedPrompt = globalOrchestrator.buildEnrichedPrompt(prompt, sectionTitle || "فكرة واستراتيجية الحل");
+  const response = await generateWithFallback(MODELS_FALLBACK, {
+    contents: enrichedPrompt,
+    config: {
+      temperature: 0.25,
+      responseMimeType: "text/plain"
+    }
+  });
+
+  const rawText = response.text || "";
+  const cleaned = cleanStrategyMetaHeaders(rawText);
+
+  // تدقيق سريع وتصحيح لكود LaTeX
+  const audited = await correctionAgent.reviewAndCorrectText(cleaned, {
+    title: "فكرة واستراتيجية الحل",
+    generatorModel: "gemini-3.8-flash"
+  });
+
+  return cleanStrategyMetaHeaders(audited);
 }
 
 export async function shortenPracticeExerciseSolutionAI(
@@ -2995,9 +3549,11 @@ export async function shortenPracticeExerciseSolutionAI(
 
 قواعد وضوابط إلزامية وصارمة لتنسيق وكتابة الحل المقلّص (MANDATORY FORMATTING RULES):
 1. العناوين الرئيسية باللون الأحمر (Main Headings in Red):
-   - يجب صياغة أي عنوان رئيسي في الحل باللون الأحمر باستخدام وسم النجمة المفردة: \`*العنوان الرئيسي باللون الأحمر*\` (مثال: \`*حل الطلب الأول:* \`).
+   - يجب صياغة أي عنوان رئيسي في الحل باللون الأحمر بكتابة نص العنوان الفعلي فقط بين نجمتين مفردتين (مثال: \`*حل الطلب الأول:* \`).
+   - يمنع كتابة عبارة "العنوان الرئيسي باللون الأحمر" كنص!
 2. العناوين الفرعية باللون الأزرق (Subheadings in Blue):
-   - يجب صياغة أي عنوان فرعي باللون الأزرق باستخدام وسم النجمة والهاش: \`*#العنوان الفرعي باللون الأزرق#*\` (مثال: \`*#حساب المشتق:#*\`).
+   - يجب صياغة أي عنوان فرعي باللون الأزرق بكتابة نص العنوان الفرعي الفعلي فقط بين نجمة وهاش (مثال: \`*#حساب المشتق:#*\`).
+   - يمنع كتابة عبارة "العنوان الفرعي باللون الأزرق" كنص!
 3. قانون عام ضمن إطار أحمر (General Law / Formula in Red Border):
    - أي قانون عام، دستور رياضي، أو مبرهنة أساسية تطبق في الحل يجب وضعها ضمن إطار أحمر باستخدام الثلاث نجمات: \`***القانون العام أو الدستور: $...$***\`.
 4. قواعد التقليص والاختصار:
@@ -3014,7 +3570,7 @@ export async function shortenPracticeExerciseSolutionAI(
 الحل الحالي المراد تقليصه:
 "${currentSolution}"
 
-أخرج النص المقلّص مباشرة بصيغة Markdown/LaTeX مع الالتزام التام بالوسوم المذكورة (عناوين رئيسية حمراء *...*، عناوين فرعية زرقاء *#...#*، قوانين عامة في إطار أحمر ***...***) بدون أي مقدمات أو هوامش تعليقية.
+أخرج النص المقلّص مباشرة بصيغة Markdown/LaTeX مع الالتزام التام بالوسوم المذكورة بدون أي مقدمات أو هوامش تعليقية.
 `;
 
   const response = await generateWithFallback(MODELS_FALLBACK, {
@@ -3219,15 +3775,26 @@ ${focusPrompt ? `توجيهات خاصة وتركيز مطلوب للتدقيق 
      * يجب استخدام المحدد المفرد '$ ... $' حصراً لرموز وصيغ LaTeX، ويمنع تماماً استخدام المحدد المزدوج '$$'.
      * تفريق الأشعة بدقة: الحرفان لهما بداية ونهاية يكتبان بالشكل '\\\\overrightarrow{AB}' والشعاع الحرف الواحد بالشكل '\\\\vec{u}'.
      * استخدام الترقيم الدائري لخطوات الحل (①، ②، ③...).
-     * يمنع استخدام كلمة "دالة" واستخدم دائماً كلمة "تابع".
+      * يمنع استخدام كلمة "دالة" واستخدم دائماً كلمة "تابع".
+5. ضابط "💡 فكرة واستراتيجية الحل" (optimizedStrategy):
+   - يجب وضع "فكرة واستراتيجية الحل" في الحاوية المخصصة لها (optimizedStrategy) حصراً، وليس في حاوية حل التمرين (optimizedSolution أو optimizedSolutionShort).
+   - اكتب الفكرة العامة للتمرين وطريقة الحل بشكل موجز ومكثف (إعطاء فكرة عامة ومنهجية التفكير والخاصّة المحورية، وليس فكرة حل أو شرح لكافة الطلبات).
+   - نموذج معتمد للاقتداء به في صياغة (optimizedStrategy):
+     "تعتمد استراتيجية الحل على الاستثمار الذكي لـ **خاصّة مركز الأبعاد المتناسبة** لإثبات تلاقي المستقيمات في الفراغ. **مثلاً:** لاثبات $(AB)$ و $(CD)$ متقاطعان نتبع مايلي:
+     1. نثبت أن نقطة ما (مثلاً $L$) هي مركز أبعاد متناسبة للنقطتين $A$ و $B$ بأوزان مناسبة. فتكون $L\\in (AB)$.
+     2. نثبت أن **$L$ نفسها** مركز الأبعاد المتناسبة للنقاط $C$ و $D$ بأوزان مناسبة ، فتكون $L\\in (CD)$.
+     3. من العلاقتين السابقتين نجد أن المستقيمين $(AB)$ و $(CD)$ متقاطعين في $L$."
+   - يُمنع منعاً باتاً كتابة شرح كامل أو تفصيل لكافة الطلبات هنا؛ لأن تفصيل كل طلب وحلوله مكانه الحصري في خطوات الحل (optimizedSolution).
+6. حظر وضع الاستراتيجية داخل حل التمرين (optimizedSolution و optimizedSolutionShort):
+   - يُمنع منعاً باتاً وضع أو تكرار عنوان أو فقرة "فكرة واستراتيجية الحل" داخل (optimizedSolution) أو (optimizedSolutionShort). إذا كانت موجودة في النص المدخل احذفها من خطوات الحل وضعها في (optimizedStrategy).
 
 الرجاء إرجاع النتيجة بصيغة JSON صالحة تماماً بالمخطط التالي:
 {
   "isCorrect": true,
   "notes": "تقرير وملاحظات التدقيق المفصلة باللغة العربية (ماذا تم تصحيحه رياضياً وإملائياً؟ وما هي النصيحة المنهجية؟)",
-  "optimizedSolution": "خطوات الحل التفصيلي النموذجي المصحح بالكامل مع الالتزام الصارم بالوسوم: عناوين رئيسية حمراء *...* وعناوين فرعية زرقاء *#...#* وقوانين عامة ضمن إطار أحمر ***...*** والترقيم الدائري",
-  "optimizedSolutionShort": "خطوات الحل المختصر والموجز والمعدل بحذف التفاصيل غير الضرورية لتقليل مساحة الورق، مع الالتزام الصارم بنفس الوسوم: عناوين رئيسية حمراء *...* وعناوين فرعية زرقاء *#...#* وقوانين عامة ضمن إطار أحمر ***...***",
-  "optimizedStrategy": "فكرة واستراتيجية الحل السريعة والمحسنة والمصححة لغوياً ورياضياً"
+  "optimizedSolution": "خطوات الحل التفصيلي النموذجي المصحح بالكامل مع الالتزام الصارم بالوسوم: عناوين رئيسية حمراء *...* وعناوين فرعية زرقاء *#...#* وقوانين عامة ضمن إطار أحمر ***...*** والترقيم الدائري وبدون أي استراتيجية بداخله",
+  "optimizedSolutionShort": "خطوات الحل المختصر والموجز والمعدل بحذف التفاصيل غير الضرورية لتقليل مساحة الورق، مع الالتزام الصارم بنفس الوسوم وبدون أي استراتيجية بداخله",
+  "optimizedStrategy": "الفكرة العامة للتمرين وطريقة الحل بشكل موجز ومكثف بدون شرح كامل لكافة الطلبات"
 }
 `;
 
@@ -3244,16 +3811,57 @@ ${focusPrompt ? `توجيهات خاصة وتركيز مطلوب للتدقيق 
   const textResp = response.text || "{}";
   const parsed = cleanJson(textResp);
 
-  const valLong = globalOrchestrator.validateMathSolution(parsed.optimizedSolution || currentSolution, "الحل المفصل");
-  const valShort = globalOrchestrator.validateMathSolution(parsed.optimizedSolutionShort || parsed.optimizedSolution || currentSolution, "الحل المختصر");
-  const valStrat = globalOrchestrator.validateMathSolution(parsed.optimizedStrategy || currentStrategy, "استراتيجية الحل");
+  // 1. الفصل الأولي بين الحلول والاستراتيجية لمنع أي تسرب
+  const preSepLong = separateStrategyAndSolution(
+    parsed.optimizedSolution || currentSolution,
+    parsed.optimizedStrategy || currentStrategy
+  );
+  const preSepShort = separateStrategyAndSolution(
+    parsed.optimizedSolutionShort || parsed.optimizedSolution || currentSolution,
+    preSepLong.cleanStrategy
+  );
+
+  // 🧑‍⚖️ الطبقة الإضافية للتحكيم والتدقيق المستقل (correctionAgent):
+  // فحص وتصحيح خطوات الحل التفصيلي والمختصر والاستراتيجية بنموذج ذكاء اصطناعي مستقل ومفصول تماماً
+  const auditedLongSol = await correctionAgent.reviewAndCorrectSolution(
+    preSepLong.cleanSolution,
+    {
+      questionText,
+      title: "الحل المفصل للتمرين (تدقيق وتصحيح)",
+      generatorModel: "gemini-3.8-flash"
+    }
+  );
+
+  const auditedShortSol = await correctionAgent.reviewAndCorrectSolution(
+    preSepShort.cleanSolution,
+    {
+      questionText,
+      title: "الحل المختصر للتمرين (تدقيق وتصحيح)",
+      generatorModel: "gemini-3.8-flash"
+    }
+  );
+
+  const auditedStrat = await correctionAgent.reviewAndCorrectText(
+    preSepLong.cleanStrategy,
+    {
+      title: "استراتيجية الحل",
+      generatorModel: "gemini-3.8-flash"
+    }
+  );
+
+  // ضمان الفصل النهائي التام بين الحلول والاستراتيجية بعد تدقيق المحكم المستقل
+  const finalLong = separateStrategyAndSolution(auditedLongSol, auditedStrat);
+  const finalShort = separateStrategyAndSolution(auditedShortSol, finalLong.cleanStrategy);
+
+  const finalNotes = (parsed.notes ? `${parsed.notes}\n\n` : '') + 
+    "⚖️ [طبقة المُحكّم المستقل correctionAgent]: تم التدقيق والتحكيم الحسابي والمنطقي المستقل وفصل فكرة الحل في الحاوية المخصصة وتصحيح كود ومحددات LaTeX بدقة 100% وفق المنهاج السوري.";
 
   return {
     isCorrect: typeof parsed.isCorrect === 'boolean' ? parsed.isCorrect : true,
-    notes: parsed.notes || "تم التدقيق والمراجعة بنجاح بنسبة 100%.",
-    optimizedSolution: valLong.text,
-    optimizedSolutionShort: valShort.text,
-    optimizedStrategy: valStrat.text
+    notes: finalNotes,
+    optimizedSolution: finalLong.cleanSolution,
+    optimizedSolutionShort: finalShort.cleanSolution,
+    optimizedStrategy: finalLong.cleanStrategy
   };
 }
 
@@ -3358,19 +3966,42 @@ ${focusPrompt ? `توجيهات خاصة وتركيز مطلوب للتدقيق 
 
   const textResp = response.text || "{}";
   const parsed = cleanJson(textResp);
+
+  // 🧑‍⚖️ الطبقة الإضافية للتحكيم والتدقيق المستقل (correctionAgent):
+  // فحص وتصحيح فقرة الدرس النظري وشرحها وملاحظاتها وأمثلتها وحلولها بنموذج ذكاء اصطناعي مستقل ومفصول تماماً
+  const auditedSection = await correctionAgent.reviewAndCorrectLessonSection(
+    {
+      title: parsed.optimizedTitle || title,
+      content: parsed.optimizedContent || content,
+      guidance: parsed.optimizedGuidance || guidance || '',
+      notes: parsed.optimizedNotes || notesText || '',
+      traps: parsed.optimizedTraps || trapsText || '',
+      examGuidance: parsed.optimizedExamGuidance || examGuidanceText || '',
+      exampleText: parsed.optimizedExampleText || exampleText || '',
+      solutionText: parsed.optimizedSolutionText || solutionText || '',
+      extraExampleText: parsed.optimizedExtraExampleText || extraExampleText || '',
+      extraSolutionText: parsed.optimizedExtraSolutionText || extraSolutionText || '',
+      focusPrompt
+    },
+    {
+      unit: title,
+      generatorModel: "gemini-3.8-flash"
+    }
+  );
+
   return {
-    isCorrect: typeof parsed.isCorrect === 'boolean' ? parsed.isCorrect : true,
-    notes: parsed.notes || "تم إجراء التدقيق العلمي واللغوي والتنسيق الاحترافي للفقرة بنجاح.",
-    optimizedTitle: parsed.optimizedTitle || title,
-    optimizedContent: parsed.optimizedContent || content,
-    optimizedGuidance: parsed.optimizedGuidance || guidance || '',
-    optimizedNotes: parsed.optimizedNotes || notesText || '',
-    optimizedTraps: parsed.optimizedTraps || trapsText || '',
-    optimizedExamGuidance: parsed.optimizedExamGuidance || examGuidanceText || '',
-    optimizedExampleText: parsed.optimizedExampleText || exampleText || '',
-    optimizedSolutionText: parsed.optimizedSolutionText || solutionText || '',
-    optimizedExtraExampleText: parsed.optimizedExtraExampleText || extraExampleText || '',
-    optimizedExtraSolutionText: parsed.optimizedExtraSolutionText || extraSolutionText || ''
+    isCorrect: auditedSection.isCorrect,
+    notes: (parsed.notes ? `${parsed.notes}\n\n` : '') + auditedSection.notes,
+    optimizedTitle: auditedSection.optimizedTitle,
+    optimizedContent: auditedSection.optimizedContent,
+    optimizedGuidance: auditedSection.optimizedGuidance,
+    optimizedNotes: auditedSection.optimizedNotes,
+    optimizedTraps: auditedSection.optimizedTraps,
+    optimizedExamGuidance: auditedSection.optimizedExamGuidance,
+    optimizedExampleText: auditedSection.optimizedExampleText,
+    optimizedSolutionText: auditedSection.optimizedSolutionText,
+    optimizedExtraExampleText: auditedSection.optimizedExtraExampleText,
+    optimizedExtraSolutionText: auditedSection.optimizedExtraSolutionText
   };
 }
 
@@ -3670,18 +4301,23 @@ ${context?.grade ? `- الصف: ${context.grade}` : ''}
 
   const parsed = cleanJson(response.text || "{}");
   
-  // التدقيق والتحقق من الأسئلة الموجهة
+  // التدقيق والتحقق من الأسئلة الموجهة عبر الوكيل المُحكّم المستقل (correctionAgent)
   if (Array.isArray(parsed.guidedQuestions)) {
-    const validated = globalOrchestrator.validateQuestionSet(
+    const validatedQuestions = await correctionAgent.reviewAndCorrectQuestions(
       parsed.guidedQuestions.map((q: any) => ({
         ...q,
         questionText: q.prompt || q.title,
-      }))
+      })),
+      {
+        title: context?.lessonTitle || exercise?.title || "أسئلة موجهة",
+        unit: context?.unit,
+        generatorModel: "gemini-3.8-flash"
+      }
     );
     parsed.guidedQuestions = parsed.guidedQuestions.map((q: any, idx: number) => ({
       ...q,
-      prompt: validated.questions[idx]?.questionText || q.prompt,
-      options: validated.questions[idx]?.options || q.options,
+      prompt: validatedQuestions[idx]?.questionText || q.prompt,
+      options: validatedQuestions[idx]?.options || q.options,
     }));
   }
 
@@ -3785,7 +4421,8 @@ ${sectionsSummary}
 1. استخدم LaTeX بين علامات '$...$' مفردة حصراً لجميع المعادلات والرموز. يُمنع استخدام '$$'.
 2. احرص على أن تكون الخيارات الأربعة فريدة ومقنعة وتحتوي خياراً واحداً صحيحاً تماماً.
 3. التزم باللغة العربية الفصيحة ومصطلحات المنهاج السوري الدقيقة (استخدم 'تابع' بدلاً من 'دالة'، لا تستخدم الجداء الخارجي للأشعة).
-4. إرجاع JSON صحيح وصالح تماماً بدون أي نصوص تمهيدية أو ختامية.`;
+4. تحذير حاسم لـ LaTeX: اكتب كل أمر ورمز رياضي بشرطة مائلة مفردة داخل علامتي الدولار $...$ (مثل: $\\frac{a}{b}$, $\\vec{u}$, $\\overrightarrow{AB}$, $\\lim_{x \\to 0}$, $\\sqrt{x}$...)، ويُمنع منعاً باتاً تكرار الشرطات المائلة في سلاسل JSON النصية لأن ذلك يفسد KaTeX ويمنع ظهور الرموز.
+5. إرجاع JSON صحيح وصالح تماماً بدون أي نصوص تمهيدية أو ختامية.`;
 
   // 1. إثراء التوجيه عبر طبقة المايسترو ومنظومة الوكلاء
   const enrichedPrompt = globalOrchestrator.buildEnrichedPrompt(basePrompt, doc.unit || doc.title);
@@ -3800,12 +4437,38 @@ ${sectionsSummary}
 
   const parsed = cleanJson(response.text || "{}");
 
-  // 2. التدقيق والتحقق الرياضي واللاتكس عبر وكيل التدقيق
+  const cleanBackslashes = (str: any): string => {
+    if (typeof str !== 'string') return str || '';
+    return str
+      .replace(/\\{2,}\s*\\hline/g, '\\\\ \\hline')
+      .replace(
+        /\\{2,}(?=(vec|overrightarrow|overline|underline|frac|sqrt|lim|to|alpha|beta|gamma|theta|lambda|mu|sigma|omega|pi|infty|Delta|cdot|times|pm|le|ge|neq|in|subset|int|ln|log|exp|sin|cos|tan|cot|sec|csc|arcsin|arccos|arctan|sinh|cosh|tanh|det|dim|ker|deg|max|min|sup|inf|sum|prod|cup|cap|lor|land|forall|exists|equiv|approx|sim|cong|partial|nabla|circ|bullet|angle|triangle|quad|qquad|left|right)\b)/g,
+        '\\'
+      )
+      .replace(/\\{2,}([()\[\]{}|;:!])/g, '\\$1');
+  };
+
+  // 2. التدقيق والتحقق الرياضي واللاتكس وتطهير أي شرطات مائلة متتالية \\
   if (Array.isArray(parsed.questions)) {
-    const validated = globalOrchestrator.validateQuestionSet(parsed.questions);
-    parsed.questions = validated.questions;
-    (parsed as any).validationScore = validated.averageScore;
-    (parsed as any).validationResults = validated.validationResults;
+    parsed.questions = parsed.questions.map((q: any) => ({
+      ...q,
+      questionText: cleanBackslashes(q.questionText),
+      explanation: cleanBackslashes(q.explanation),
+      hint: cleanBackslashes(q.hint),
+      options: Array.isArray(q.options)
+        ? q.options.map((opt: any) => ({
+            ...opt,
+            text: cleanBackslashes(opt.text),
+            misconceptionDiagnosis: cleanBackslashes(opt.misconceptionDiagnosis)
+          }))
+        : q.options
+    }));
+
+    parsed.questions = await correctionAgent.reviewAndCorrectQuestions(parsed.questions, {
+      title: doc.unit || doc.title || "اختبار الوحدة",
+      unit: doc.unit,
+      generatorModel: "gemini-3.8-flash"
+    });
   }
 
   return parsed as GeneratedUnitQuizResult;
@@ -4071,7 +4734,7 @@ ${sectionsContent}
 4. **المطبات الامتحانية وملاحظات التوجيه الذهبي (Exam Traps & Crucial Tips)**:
    - الأخطاء الشائعة وسوء الفهم التي يقع فيها الطلاب في الامتحانات وكيفية التفكير والحل الصحيح لتفاديها.
 5. **الملخص الشامل المنسق (Master Summary Text)**:
-   - نص Markdown متكامل ومرتب بفواصل وعناوين فرعية، يستعرض الوحدة بشكل تسلسلي مكثف مع معادلات LaTeX واضحة بين '$...$' مفردة، ليكون مرجعاً نظرياً ذهبياً للطالب قبل الامتحان.
+   - نص Markdown متكامل ومرتب بفواصل وعناوين مع الالتزام الصارم بالوسوم: العناوين الرئيسية باللون الأحمر دائماً \*العنوان الرئيسي\* أو \`<h1>/<h2>\` أو \`<main-title>...</main-title>\`، والعناوين الفرعية باللون الأزرق دائماً \*\#العنوان الفرعي\#\* أو \`<h3>/<h4>\` أو \`<sub-title>...</sub-title>\`، والوسم \*\*عبارة\*\* حصراً لتظليل الكلمات والمفاهيم الهامة بلون بنفسجي فاتح وبدون إطار ضمن الشرح (ويُمنع منعاً باتاً استخدامه كعنوان فقرة)، والقوانين والدساتير ضمن إطار أحمر \`***دستور: $...$***\`، ومعادلات LaTeX واضحة بين '$...$' مفردة.
 6. **خلاصة القوانين السريعة (Formulas Summary)**:
    - جدول أو قائمة بالقوانين والصيغ الرياضية الرمزية الحصرية للوحدة.
 
@@ -4133,6 +4796,199 @@ ${sectionsContent}
   });
 
   const parsed = cleanJson(response.text || "{}");
-  const harmonized = globalOrchestrator.validateAndHarmonizeReview(parsed);
-  return harmonized.data as GeneratedUnitReviewResult;
+  const reviewed = await correctionAgent.reviewAndCorrectUnitReview(parsed, {
+    title: doc.title,
+    unit: doc.unit,
+    generatorModel: "gemini-3.8-flash"
+  });
+  return reviewed as GeneratedUnitReviewResult;
+}
+
+// ============================================================================
+// 📖 Dedicated Single Lesson & Exercise Extraction (PDF & Image)
+// ============================================================================
+
+export async function generateSingleTheoreticalLessonFromPdf(
+  pdfContent: string,
+  config: { title?: string; grade?: string; subject?: string; unit?: string } = {}
+): Promise<any> {
+  const prompt = `
+أنت خبير تربوي ومؤلف مناهج رياضيات أول وفق المنهاج السوري للثالث الثانوي العلمي.
+المطلوب: استخراج وصياغة "درس نظري متكامل وشامل" من نص مرجع الـ PDF التالي:
+- عنوان الدرس: يجب أن يكون دقيقاً وشاملاً للمفهوم الرياضي الوارد (مثال: "الدرس: نهاية تابع عند اللانهاية").
+- صياغة الفكرة والشرح المفهومي الأساسي (content): شرح سلس وعميق بأسلوب الطالب والتبسيط العلمي الموجه، مدعم بكافة القوانين والتعاريف والمبرهنات.
+- إرشادات ذكية (guidance): توجيهات مفاهيمية للتعامل مع الفكرة.
+- ملاحظات ونتائج هامة (notes): النتائج الرياضية والخواص الهامة والقواعد التحليلية.
+- مطبات امتحانية (traps): الأخطاء الشائعة والزلات التي يقع فيها الطلاب مع التحذير منها.
+- الدليل الامتحاني (examGuidance): كيفية ورود الفكرة في الامتحان وسلم التصحيح المعتمد.
+- تمرين تطبيقي (exampleText): مسألة أو تمرين تطبيقي شامل ومباشر لترسيخ المفهوم.
+- الحل النموذجي للتمرين (solutionText): حل تفصيلي ومبرر خطوة بخطوة بالترقيم الدائري ① ② ③.
+- تمرين إضافي (extraExampleText): مسألة تطبيقية إضافية هامة.
+- حل التمرين الإضافي (extraSolutionText): حل مفصل ودقيق للتمرين الإضافي.
+- كود SVG (svgCode): كود SVG كامل وعالي الدقة إذا تطلب الدرس رسماً توضيحياً هندسياً أو بيانياً أو جدول تغيرات (يبدأ بـ <svg> وينتهي بـ </svg>)، أو "" إذا لم يلزم.
+
+قواعد صارمة:
+1. قاعدة الدولار المفرد ($ ... $): اكتب كافة المعادلات والرموز الرياضية داخل $...$ حصراً (يُمنع منعاً باتاً $$...$$).
+2. مصطلحات المنهاج السوري: استخدام مصطلح "تابع" حصراً ومنع كلمة "دالة". الأشعة بحرف واحد $\\vec{u}$، وحرفين $\\overrightarrow{AB}$. الجداء السلمي $\\vec{u} \\cdot \\vec{v}$.
+3. الترقيم الدائري: استخدم ① ② ③ لترقيم الخطوات.
+
+أخرج النتيجة بصيغة JSON حصراً بهذا الشكل:
+{
+  "title": "عنوان الدرس النظري الدقيق",
+  "content": "الشرح المفهومي الأساسي...",
+  "guidance": "إرشادات ذكية...",
+  "notes": "ملاحظات وقوانين هامة...",
+  "traps": "مطبات امتحانية وأخطاء شائعة...",
+  "examGuidance": "الدليل الامتحاني وطريقة الحل...",
+  "exampleText": "نص التمرين التطبيقي...",
+  "solutionText": "① الحل النموذجي للتمرين التطبيقي...",
+  "extraExampleText": "نص التمرين الإضافي...",
+  "extraSolutionText": "① حل التمرين الإضافي...",
+  "svgCode": ""
+}
+
+نص المرجع (PDF):
+${pdfContent.substring(0, 50000)}
+`;
+
+  const response = await generateWithFallback(MODELS_FALLBACK, {
+    contents: prompt,
+    config: {
+      temperature: 0.2,
+      responseMimeType: "application/json"
+    }
+  });
+
+  const parsed = cleanJson(response.text || "{}");
+  return await correctionAgent.reviewAndCorrectLesson(parsed, {
+    title: config.title || parsed.title || "درس نظري",
+    unit: config.unit,
+    generatorModel: "gemini-3.8-flash"
+  });
+}
+
+export async function generateSinglePracticeLessonFromPdf(
+  pdfContent: string,
+  config: { title?: string; grade?: string; subject?: string; unit?: string } = {}
+): Promise<any> {
+  const prompt = `
+أنت خبير تربوي ومؤلف مناهج رياضيات أول وفق المنهاج السوري للثالث الثانوي العلمي.
+المطلوب: استخراج وصياغة "درس تدرّب (تطبيقات وتمارين الكتاب)" من نص مرجع الـ PDF التالي:
+- عنوان الدرس: عنوان مناسب لفقرة التدرّب والتمارين (مثال: "تدرّب: تطبيقات وتمارين الكتاب").
+- استخراج جميع مسائل وتمارين "تدرّب" الواردة في المرجع بدقة متناهية:
+  * title: عنوان التمرين (مثال: "تمرين تدرّب #1").
+  * questionText: نص المسألة كما ورد في الكتاب بدقة مع صياغة كافة المعادلات بـ LaTeX داخل علامة الدولار المفردة $...$.
+  * strategyText: كتابة الفكرة العامة للتمرين وطريقة الحل بشكل موجز ومكثف (سطران إلى 4 أسطر فقط)، وليس شرحاً كاملاً لكافة الطلبات (مكانه في solutionText).
+  * solutionText: الحل النموذجي المفصل والكامل خطوة بخطوة مبرراً بدقة مع الترقيم الدائري ① ② ③.
+  * svgCode: كود رسم SVG توضيحي إذا تضمن التمرين شكلاً هندسياً أو بياناً أو جدول تغيرات، أو "" إذا لم يتضمن.
+
+قواعد صارمة:
+1. قاعدة الدولار المفرد ($ ... $): اكتب كافة المعادلات والرموز الرياضية داخل $...$ حصراً (يُمنع منعاً باتاً $$...$$).
+2. المنهاج السوري: استخدام كلمة "تابع" ومنع "دالة"، الأشعة $\vec{u}$ و $\overrightarrow{AB}$، الجداء السلمي، المجالات السورية $]a, b[$.
+3. عدم حذف أي تمرين من المرجع.
+
+أخرج النتيجة بصيغة JSON حصراً بهذا الشكل:
+{
+  "title": "عنوان درس التدرّب",
+  "practiceExercises": [
+    {
+      "title": "تمرين تدرّب #1",
+      "questionText": "نص المسألة...",
+      "strategyText": "💡 فكرة واستراتيجية الحل: الفكرة العامة للتمرين وطريقة الحل بشكل موجز ومكثف...",
+      "solutionText": "① خطوات الحل النموذجي التفصيلية...",
+      "svgCode": ""
+    }
+  ]
+}
+
+نص المرجع (PDF):
+${pdfContent.substring(0, 50000)}
+`;
+
+  const response = await generateWithFallback(MODELS_FALLBACK, {
+    contents: prompt,
+    config: {
+      temperature: 0.2,
+      responseMimeType: "application/json"
+    }
+  });
+
+  const parsed = cleanJson(response.text || "{}");
+  if (parsed && Array.isArray(parsed.practiceExercises)) {
+    parsed.practiceExercises = await correctionAgent.reviewAndCorrectPracticeExercises(
+      parsed.practiceExercises,
+      {
+        title: config.title || parsed.title || "درس تدرّب",
+        unit: config.unit,
+        generatorModel: "gemini-3.8-flash"
+      }
+    );
+  }
+  return parsed;
+}
+
+export async function extractPracticeExerciseFromImage(
+  base64Image: string,
+  mimeType: string = 'image/jpeg',
+  config?: { grade?: string; subject?: string }
+): Promise<any> {
+  const prompt = `
+أنت خبير رياضيات وأخصائي OCR دقيق وفق المنهاج السوري للثالث الثانوي العلمي.
+المطلوب: استخراج وقراءة التمرين الرياضي من الصورة المرفقة وصياغة حل نموذجي متكامل له.
+1. استخرج عنواناً مناسباً للتمرين في "title" (مثال: "تمرين تدرّب: حساب النهايات").
+2. استخرج نص التمرين بالكامل بدقة متناهية في "questionText":
+   - كتابة كافة الرموز والمعادلات الرياضية بصيغة LaTeX داخل علامة الدولار المفردة $...$ حصراً.
+   - احترام المنهاج السوري: استخدام "تابع" حصراً ومنع "دالة"، والأشعة $\\vec{u}$ و $\\overrightarrow{AB}$.
+3. صياغة استراتيجية وفكرة الحل: كتابة الفكرة العامة للتمرين وطريقة الحل بشكل موجز ومكثف (سطران إلى 4 أسطر فقط)، وليس شرحاً كاملاً لكافة الطلبات في "strategyText".
+4. صياغة الحل النموذجي والمفصل خطوة بخطوة بالترقيم الدائري ① ② ③ في "solutionText".
+5. إذا كانت الصورة تحتوي على رسم هندسي أو خط بياني أو جدول تغيرات، قم بإنشاء كود SVG نقي ومتقن يطابقه في "svgCode"، وإلا اتركه فارغاً "".
+
+أخرج JSON حصراً بالصيغة التالية:
+{
+  "title": "عنوان التمرين",
+  "questionText": "نص التمرين...",
+  "strategyText": "💡 فكرة واستراتيجية الحل: الفكرة العامة وطريقة الحل بإيجاز...",
+  "solutionText": "① خطوات الحل النموذجي...",
+  "svgCode": ""
+}
+`;
+
+  const cleanBase64 = base64Image.replace(/^data:image\/[a-zA-Z]+;base64,/, '');
+
+  const response = await generateWithFallback(MODELS_FALLBACK, {
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: prompt },
+          {
+            inlineData: {
+              mimeType: mimeType || "image/jpeg",
+              data: cleanBase64
+            }
+          }
+        ]
+      }
+    ],
+    config: {
+      temperature: 0.2,
+      responseMimeType: "application/json"
+    }
+  });
+
+  const parsed = cleanJson(response.text || "{}");
+  if (parsed && parsed.solutionText) {
+    parsed.solutionText = await correctionAgent.reviewAndCorrectSolution(parsed.solutionText, {
+      questionText: parsed.questionText,
+      title: parsed.title,
+      generatorModel: "gemini-3.8-flash"
+    });
+  }
+  if (parsed && parsed.strategyText) {
+    parsed.strategyText = await correctionAgent.reviewAndCorrectText(parsed.strategyText, {
+      title: `${parsed.title} (استراتيجية)`,
+      generatorModel: "gemini-3.8-flash"
+    });
+  }
+  return parsed;
 }

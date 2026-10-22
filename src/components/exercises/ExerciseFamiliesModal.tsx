@@ -500,7 +500,14 @@ export const ExerciseFamiliesModal: React.FC<ExerciseFamiliesModalProps> = ({
                         : 'bg-transparent text-slate-600 border-transparent hover:bg-slate-50 hover:text-slate-900'
                     }`}
                   >
-                    <span>{fam.familyName}</span>
+                    <div className="flex items-center gap-1.5">
+                      <span>{fam.familyName}</span>
+                      {fam.id !== undefined && (
+                        <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-indigo-100 text-indigo-800 border border-indigo-200 shrink-0 font-bold" title={`معرف التصنيف/العائلة: ${fam.id}`}>
+                          #{fam.id}
+                        </span>
+                      )}
+                    </div>
                     <span
                       className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
                         isActive

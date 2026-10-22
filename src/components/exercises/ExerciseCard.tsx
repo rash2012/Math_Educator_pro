@@ -1,7 +1,7 @@
 import React from 'react';
 import { type PracticeExercise } from '../../db';
 import { MathRenderer } from '../MathRenderer';
-import { cleanAndEnforceMathSvg } from '../../services/gemini';
+import { cleanAndEnforceMathSvg, cleanStrategyMetaHeaders } from '../../services/gemini';
 import { 
   Edit3, CheckCircle, Sparkles, Scissors, ImageIcon, 
   Copy, CopyCheck, CopyPlus, Trash2, Loader2 
@@ -13,10 +13,11 @@ interface ExerciseCardProps {
   sectionId: number;
   showSolutions: boolean;
   copiedId: string | null;
-  aiLoading: { exId: string; type: 'solution' | 'shorten' | 'svg' } | null;
+  aiLoading: { exId: string; type: 'solution' | 'shorten' | 'svg' | 'strategy' } | null;
   onEdit: () => void;
   onVerify: () => void;
   onGenerateSolution: () => void;
+  onRegenerateStrategy?: () => void;
   onShortenSolution: () => void;
   onGenerateSvg: () => void;
   onCopy: () => void;
@@ -33,13 +34,14 @@ export const ExerciseCard: React.FC<ExerciseCardProps> = ({
   onEdit,
   onVerify,
   onGenerateSolution,
+  onRegenerateStrategy,
   onShortenSolution,
   onGenerateSvg,
   onCopy,
   onDuplicate,
   onDelete
 }) => {
-  const isCurrentLoading = (type: 'solution' | 'shorten' | 'svg') => 
+  const isCurrentLoading = (type: 'solution' | 'shorten' | 'svg' | 'strategy') => 
     aiLoading?.exId === exercise.id && aiLoading?.type === type;
 
   // Extract SVGs and make them responsive
@@ -63,12 +65,25 @@ export const ExerciseCard: React.FC<ExerciseCardProps> = ({
     >
       {/* Exercise Header Bar */}
       <div className="bg-violet-50/20 px-5 py-3 border-b border-gray-200/70 flex justify-between items-center flex-wrap gap-2 print:bg-transparent print:border-none print:px-0 print:py-1 print:mb-1.5">
-        <span className="text-xs md:text-sm font-black text-violet-950 flex items-center gap-2 font-sans print:text-black">
-          <span className="w-6 h-6 rounded-full bg-violet-600 text-white text-[11px] font-black flex items-center justify-center shadow-xs print:bg-violet-800 print:text-white">
-            {index + 1}
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <span className="text-xs md:text-sm font-black text-violet-950 flex items-center gap-2 font-sans print:text-black">
+            <span className="w-6 h-6 rounded-full bg-violet-600 text-white text-[11px] font-black flex items-center justify-center shadow-xs print:bg-violet-800 print:text-white">
+              {index + 1}
+            </span>
+            <span>{exercise.title || `التمرين ${index + 1}`}</span>
           </span>
-          <span>{exercise.title || `التمرين ${index + 1}`}</span>
-        </span>
+
+          {/* رمز سلة المحذوفات بجانب كل تمرين لحذف التمرين كاملاً بعد رسالة التأكيد */}
+          <button
+            type="button"
+            onClick={onDelete}
+            className="no-print flex items-center gap-1 px-2.5 py-1 text-rose-600 hover:text-white bg-rose-50 hover:bg-rose-600 border border-rose-200 hover:border-rose-600 rounded-xl transition-all cursor-pointer shadow-2xs font-sans group"
+            title="حذف هذا التمرين كاملاً بعد رسالة التأكيد 🗑️"
+          >
+            <Trash2 size={13} className="transition-transform group-hover:scale-110" />
+            <span className="text-[11px] font-black">حذف التمرين</span>
+          </button>
+        </div>
 
         {/* Action Tools (no-print) */}
         <div className="flex items-center gap-1.5 flex-wrap no-print">
@@ -102,6 +117,19 @@ export const ExerciseCard: React.FC<ExerciseCardProps> = ({
             {isCurrentLoading('solution') ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
             <span>الحل النموذجي</span>
           </button>
+
+          {/* AI Strategy if missing */}
+          {!exercise.strategyText?.trim() && onRegenerateStrategy && (
+            <button
+              onClick={onRegenerateStrategy}
+              disabled={isCurrentLoading('strategy')}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-black rounded-xl border border-amber-200 transition-all cursor-pointer disabled:opacity-50 shadow-2xs"
+              title="توليد فكرة واستراتيجية الحل بالذكاء الاصطناعي بشكل موجز"
+            >
+              {isCurrentLoading('strategy') ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+              <span>فكرة الحل 💡</span>
+            </button>
+          )}
 
           {/* Shorten Solution */}
           <button
@@ -145,9 +173,10 @@ export const ExerciseCard: React.FC<ExerciseCardProps> = ({
 
           {/* Delete */}
           <button
+            type="button"
             onClick={onDelete}
-            className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all cursor-pointer"
-            title="حذف التمرين"
+            className="p-1.5 text-rose-500 hover:text-white hover:bg-rose-600 bg-rose-50/60 rounded-lg transition-all cursor-pointer border border-rose-100"
+            title="حذف هذا التمرين كاملاً بعد رسالة التأكيد 🗑️"
           >
             <Trash2 size={15} />
           </button>
@@ -183,8 +212,30 @@ export const ExerciseCard: React.FC<ExerciseCardProps> = ({
           {/* Strategy Box (💡 فكرة واستراتيجية الحل السريعة) */}
           {exercise.strategyText && exercise.strategyText.trim() && (
             <div className="strategy-box p-3.5 bg-yellow-50/80 rounded-xl border border-[#78350f] text-xs text-amber-950 leading-relaxed font-sans font-medium text-right w-full clear-both print:bg-[#fefce8] print:border-[#78350f]">
-              <span className="font-extrabold text-amber-900 block mb-1">💡 فكرة واستراتيجية الحل:</span>
-              <MathRenderer content={exercise.strategyText} />
+              <div className="flex items-center justify-between mb-1.5 no-print">
+                <span className="font-extrabold text-amber-900 flex items-center gap-1 font-sans">
+                  <span>💡</span>
+                  <span>فكرة واستراتيجية الحل:</span>
+                </span>
+                {onRegenerateStrategy && (
+                  <button
+                    onClick={onRegenerateStrategy}
+                    disabled={isCurrentLoading('strategy')}
+                    className="flex items-center gap-1 px-2.5 py-0.5 bg-amber-100 hover:bg-amber-200 text-amber-950 text-[11px] font-black rounded-lg border border-amber-300 transition-all cursor-pointer shadow-2xs disabled:opacity-50"
+                    title="إعادة صياغة فكرة واستراتيجية الحل بالذكاء الاصطناعي بأسلوب تربوي وبيداغوجي موجز واحترافي"
+                  >
+                    {isCurrentLoading('strategy') ? (
+                      <Loader2 size={11} className="animate-spin" />
+                    ) : (
+                      <Sparkles size={11} className="text-amber-800" />
+                    )}
+                    <span>إعادة الصياغة بالذكاء ✨</span>
+                  </button>
+                )}
+              </div>
+              <div className="print:block">
+                <MathRenderer content={cleanStrategyMetaHeaders(exercise.strategyText)} />
+              </div>
             </div>
           )}
         </div>

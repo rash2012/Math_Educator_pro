@@ -20,7 +20,8 @@ import {
   CheckCircle2,
   ClipboardCheck,
   Zap,
-  Sparkles
+  Sparkles,
+  Printer
 } from 'lucide-react';
 import { TestView } from './TestView';
 import { ConfirmDialog } from './ui/ConfirmDialog';
@@ -34,6 +35,7 @@ import { DEFAULT_SERIES_NAME, DEFAULT_TEACHER_NAME, DEFAULT_TEACHER_ROLE } from 
 import { UnifiedPageHeader } from './common/UnifiedPageHeader';
 import { SyncStatusBadge } from './SyncStatusBadge';
 import { SyncControlButton } from './SyncControlButton';
+import { LocalDatabaseIdBadge } from './common/LocalDatabaseIdBadge';
 import { computeTestHash, computeContentHash, getSupabaseClient, saveSyncMapping, cleanupAllDuplicateTests, type SyncStatus } from '../services/supabaseSync';
 
 export const TestsDashboard: React.FC = () => {
@@ -42,6 +44,7 @@ export const TestsDashboard: React.FC = () => {
   const [syncStatuses, setSyncStatuses] = useState<Record<number, SyncStatus>>({});
   const [loading, setLoading] = useState(true);
   const [selectedTestId, setSelectedTestId] = useState<number | null>(null);
+  const [autoPrintTest, setAutoPrintTest] = useState(false);
   const [activeCategoryId, setActiveCategoryId] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -63,7 +66,7 @@ export const TestsDashboard: React.FC = () => {
 
   // Review State
   const [reviewingTestId, setReviewingTestId] = useState<number | null>(null);
-  const [activeReport, setActiveReport] = useState<{ title: string; report: string } | null>(null);
+  const [activeReport, setActiveReport] = useState<{ title: string; report: string; testId?: number; issuesCount?: number } | null>(null);
 
   // Cloud Deduplication & Cleanup State
   const [showCleanupModal, setShowCleanupModal] = useState(false);
@@ -111,8 +114,13 @@ export const TestsDashboard: React.FC = () => {
     teacherRole?: string;
   }) => {
     if (!editingTest?.id) return;
+    const currentTest = await db.tests.get(editingTest.id);
+    const baseTestData = currentTest?.testData || editingTest.testData;
+    const updatedTestData = baseTestData ? { ...baseTestData, title: updated.title } : undefined;
+
     await db.tests.update(editingTest.id, {
       title: updated.title,
+      ...(updatedTestData ? { testData: updatedTestData } : {}),
       country: updated.country,
       grade: updated.grade,
       subject: updated.subject,
@@ -164,7 +172,7 @@ export const TestsDashboard: React.FC = () => {
       for (const test of allTests) {
         if (!test.id) continue;
         let m = mappingMap.get(String(test.id));
-        const testTitle = (test.testData?.title || test.title || '').trim();
+        const testTitle = (test.title || test.testData?.title || '').trim();
         const remoteMatch = remoteTestsMap.get(testTitle);
 
         if (!m || !m.remoteId) {
@@ -252,7 +260,12 @@ export const TestsDashboard: React.FC = () => {
         reviewReport: result.reportMarkdown,
         reviewIssues: result.issues
       });
-      setActiveReport({ title: test.title, report: result.reportMarkdown });
+      setActiveReport({ 
+        title: test.title, 
+        report: result.reportMarkdown,
+        testId: test.id,
+        issuesCount: result.issues?.length || 0
+      });
       loadData();
     } catch (error) {
       console.error("Review failed", error);
@@ -282,6 +295,20 @@ export const TestsDashboard: React.FC = () => {
         const rawData = JSON.parse(text);
         
         let testData: any;
+
+        let targetCatId: number | undefined = undefined;
+        if (typeof rawData.categoryId === 'number') {
+          // Check if this category ID actually exists in the local database
+          const catExists = categories.some(c => c.id === rawData.categoryId);
+          if (catExists) {
+            targetCatId = rawData.categoryId;
+          } else {
+            // Category ID doesn't exist locally: if user currently has an active category open, assign it, otherwise keep undefined (general)
+            targetCatId = activeCategoryId !== null ? activeCategoryId : undefined;
+          }
+        } else if (activeCategoryId !== null) {
+          targetCatId = activeCategoryId;
+        }
 
         // Check if it's the new format (with 'content' property)
         if (rawData.content && (rawData.content.problems || rawData.content.exercises || rawData.content.shortAnswer || rawData.content.multipleChoice)) {
@@ -347,25 +374,44 @@ export const TestsDashboard: React.FC = () => {
 
             testData = {
                 title: rawData.title || 'اختبار مستورد',
+                country: rawData.country || 'سوريا',
                 grade: rawData.grade || '',
                 subject: rawData.subject || '',
+                part: rawData.part || undefined,
+                unit: rawData.unit || undefined,
+                topic: rawData.topic || undefined,
                 difficulty: rawData.difficulty || 'متوسط',
-                scope: rawData.type === 'part' ? 'وحدة تعليمية' : 'عام',
+                scope: rawData.type === 'part' ? 'وحدة تعليمية' : (rawData.scope || 'عام'),
+                categoryId: targetCatId,
+                isReviewed: Boolean(rawData.isReviewed),
+                reviewReport: rawData.reviewReport || undefined,
+                reviewIssues: Array.isArray(rawData.reviewIssues) ? rawData.reviewIssues : undefined,
                 createdAt: Date.now(),
                 testData: { sections }
             };
         } else if (rawData.testData && rawData.testData.sections) {
-            testData = rawData as any;
+            testData = {
+                ...rawData,
+                categoryId: targetCatId,
+                createdAt: Date.now()
+            };
             delete testData.id;
-            testData.createdAt = Date.now();
         } else {
              // Basic fallback
              testData = {
                 title: rawData.title || 'اختبار مستورد',
+                country: rawData.country || 'سوريا',
                 grade: rawData.grade || '',
                 subject: rawData.subject || '',
+                part: rawData.part || undefined,
+                unit: rawData.unit || undefined,
+                topic: rawData.topic || undefined,
                 difficulty: rawData.difficulty || 'متوسط',
                 scope: rawData.scope || 'وحدة تعليمية',
+                categoryId: targetCatId,
+                isReviewed: Boolean(rawData.isReviewed),
+                reviewReport: rawData.reviewReport || undefined,
+                reviewIssues: Array.isArray(rawData.reviewIssues) ? rawData.reviewIssues : undefined,
                 createdAt: Date.now(),
                 testData: rawData.testData || { sections: [] }
             };
@@ -398,7 +444,16 @@ export const TestsDashboard: React.FC = () => {
   });
 
   if (selectedTestId) {
-    return <TestView testId={selectedTestId} onBack={() => setSelectedTestId(null)} />;
+    return (
+      <TestView 
+        testId={selectedTestId} 
+        onBack={() => {
+          setSelectedTestId(null);
+          setAutoPrintTest(false);
+        }} 
+        autoTriggerPrint={autoPrintTest} 
+      />
+    );
   }
 
   return (
@@ -526,7 +581,14 @@ export const TestsDashboard: React.FC = () => {
                     <div className={`p-1.5 rounded-lg ${activeCategoryId === cat.id ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-400'}`}>
                       <Folder size={14} />
                     </div>
-                    <span className="truncate">{cat.name}</span>
+                    <div className="flex items-center gap-1.5 truncate">
+                      <span className="truncate">{cat.name}</span>
+                      {cat.id !== undefined && (
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800 border border-indigo-200 shrink-0 font-bold" title={`معرف التصنيف (categoryId): ${cat.id}`}>
+                          #{cat.id}
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-[10px] bg-white border px-1.5 py-0.5 rounded-lg opacity-60">
@@ -656,7 +718,10 @@ export const TestsDashboard: React.FC = () => {
                       ? 'bg-emerald-50/30 border-emerald-200 hover:border-emerald-400 hover:shadow-emerald-100 shadow-emerald-50' 
                       : 'bg-white border-gray-200 hover:shadow-xl hover:border-indigo-200'
                   }`}
-                  onClick={() => setSelectedTestId(test.id!)}
+                  onClick={() => {
+                    setAutoPrintTest(false);
+                    setSelectedTestId(test.id!);
+                  }}
                 >
                   <div className="flex justify-between items-start mb-4 relative z-10">
                     <div className="flex flex-col gap-1 flex-grow">
@@ -667,6 +732,7 @@ export const TestsDashboard: React.FC = () => {
                                جاهز
                              </div>
                            )}
+                           <LocalDatabaseIdBadge id={test.id} tableLabel="tests" compact={true} />
                            <SyncStatusBadge
                              table="tests"
                              id={test.id!}
@@ -775,19 +841,34 @@ export const TestsDashboard: React.FC = () => {
                         )}
                     </div>
 
-                    <div className="flex items-center justify-between border-t border-gray-100 pt-4">
-                       <span className={`text-[10px] font-black px-3 py-1 rounded-full ${
-                           test.difficulty === 'سهل' ? 'bg-emerald-50 text-emerald-700' : 
-                           test.difficulty === 'متوسط' ? 'bg-amber-50 text-amber-700' : 
-                           test.difficulty === 'صعب' ? 'bg-orange-50 text-orange-700' : 'bg-red-50 text-red-700'
-                       }`}>
-                         {test.difficulty}
-                       </span>
-                       <span className="text-[10px] text-gray-400 font-bold">
-                         {new Date(test.createdAt).toLocaleDateString("ar-SY", {
-                             year: 'numeric', month: 'short', day: 'numeric'
-                         })}
-                       </span>
+                    <div className="flex items-center justify-between border-t border-gray-100 pt-4 gap-2">
+                       <div className="flex items-center gap-2">
+                         <span className={`text-[10px] font-black px-2.5 py-1 rounded-full ${
+                             test.difficulty === 'سهل' ? 'bg-emerald-50 text-emerald-700' : 
+                             test.difficulty === 'متوسط' ? 'bg-amber-50 text-amber-700' : 
+                             test.difficulty === 'صعب' ? 'bg-orange-50 text-orange-700' : 'bg-red-50 text-red-700'
+                         }`}>
+                           {test.difficulty}
+                         </span>
+                         <span className="text-[10px] text-gray-400 font-bold">
+                           {new Date(test.createdAt).toLocaleDateString("ar-SY", {
+                               year: 'numeric', month: 'short', day: 'numeric'
+                           })}
+                         </span>
+                       </div>
+                       <button
+                         type="button"
+                         onClick={(e) => {
+                           e.stopPropagation();
+                           setAutoPrintTest(true);
+                           setSelectedTestId(test.id!);
+                         }}
+                         className="text-indigo-700 hover:text-indigo-950 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/90 px-2 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                         title="معاينة الطباعة / حفظ كـ PDF"
+                       >
+                         <Printer size={13} />
+                         <span>معاينة الطباعة / PDF</span>
+                       </button>
                     </div>
                   </div>
                   
@@ -798,7 +879,12 @@ export const TestsDashboard: React.FC = () => {
                     <div 
                        onClick={(e) => {
                          e.stopPropagation();
-                         setActiveReport({ title: test.title, report: test.reviewReport! });
+                         setActiveReport({ 
+                           title: test.title, 
+                           report: test.reviewReport!, 
+                           testId: test.id, 
+                           issuesCount: test.reviewIssues?.length || 0 
+                         });
                        }}
                        className="absolute bottom-2 left-2 bg-indigo-600 text-white p-1 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity cursor-help shadow-lg"
                        title="انقر لعرض تقرير المراجعة الأخير"
@@ -845,10 +931,25 @@ export const TestsDashboard: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-6 bg-gray-50 border-t flex justify-end">
+              <div className="p-6 bg-gray-50 border-t flex items-center justify-between">
+                <div>
+                  {activeReport.testId && (
+                    <button
+                      onClick={() => {
+                        const tId = activeReport.testId;
+                        setActiveReport(null);
+                        setSelectedTestId(tId);
+                      }}
+                      className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-black hover:bg-indigo-700 transition-all shadow-lg flex items-center gap-2"
+                    >
+                      <Sparkles size={18} />
+                      فتح الاختبار وتطبيق الإصلاحات الذكية ({activeReport.issuesCount || 0})
+                    </button>
+                  )}
+                </div>
                 <button
                   onClick={() => setActiveReport(null)}
-                  className="px-8 py-3 bg-indigo-600 text-white rounded-xl font-black hover:bg-indigo-700 transition-all shadow-lg"
+                  className="px-6 py-3 bg-gray-200 text-gray-700 rounded-xl font-bold hover:bg-gray-300 transition-all"
                 >
                   إغلاق التقرير
                 </button>

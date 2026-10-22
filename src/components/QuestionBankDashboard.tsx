@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { db, type QuestionBank } from '../db';
-import { Library, Loader2, Trash2, Eye, Filter, Plus, BookOpen, Layers, Edit3, X, Download, Upload, Globe, Bookmark, GraduationCap, BookMarked } from 'lucide-react';
+import { Library, Loader2, Trash2, Eye, Filter, Plus, BookOpen, Layers, Edit3, X, Download, Upload, UploadCloud, Globe, Bookmark, GraduationCap, BookMarked, Printer, Settings2 } from 'lucide-react';
 import { QuestionBankView } from './QuestionBankView';
+import { QuestionBankSync } from './QuestionBankSync';
 import { ConfirmDialog } from './ui/ConfirmDialog';
 import { DocumentMetadataModal } from './DocumentMetadataModal';
+import { SupabaseConfigModal } from './common/SupabaseConfigModal';
 import { DEFAULT_COUNTRY, DEFAULT_GRADE, DEFAULT_SUBJECT, DEFAULT_SERIES_NAME, DEFAULT_TEACHER_NAME, DEFAULT_TEACHER_ROLE } from '../constants/academicData';
 import { motion, AnimatePresence } from 'motion/react';
 import { UnifiedPageHeader } from './common/UnifiedPageHeader';
@@ -14,6 +16,8 @@ export const QuestionBankDashboard: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [selectedBankId, setSelectedBankId] = useState<number | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [syncingBank, setSyncingBank] = useState<QuestionBank | null>(null);
+  const [isGeneralSyncOpen, setIsGeneralSyncOpen] = useState(false);
 
   const importInputRef = useRef<HTMLInputElement>(null);
 
@@ -275,6 +279,13 @@ export const QuestionBankDashboard: React.FC = () => {
         badgeColor="amber"
         actions={
           <>
+            <button
+              onClick={() => setIsGeneralSyncOpen(true)}
+              className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black transition-all shadow-xs active:scale-95 cursor-pointer"
+            >
+              <Upload size={14} />
+              <span>مزامنة بنك الأسئلة</span>
+            </button>
             <input
               type="file"
               accept="application/json"
@@ -299,6 +310,16 @@ export const QuestionBankDashboard: React.FC = () => {
           </>
         }
       />
+
+      {(syncingBank || isGeneralSyncOpen) && (
+        <QuestionBankSync 
+          initialBank={syncingBank} 
+          onClose={() => {
+            setSyncingBank(null);
+            setIsGeneralSyncOpen(false);
+          }} 
+        />
+      )}
 
       {/* Unified Filter Bar */}
       <UnifiedFilterBar
@@ -342,7 +363,18 @@ export const QuestionBankDashboard: React.FC = () => {
                     بنك أسئلة
                   </span>
 
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-1.5">
+                    <button 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSyncingBank(bank);
+                      }}
+                      className="flex items-center gap-1 px-2.5 py-1 text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg text-xs font-black transition-colors cursor-pointer shadow-2xs"
+                      title="مزامنة أسئلة هذا البنك إلى قاعدة البيانات السحابية (NewQuestionBanks)"
+                    >
+                      <UploadCloud size={13} />
+                      <span>مزامنة</span>
+                    </button>
                     <button 
                       onClick={(e) => openEditModal(bank, e)}
                       className="p-1.5 text-gray-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors"
@@ -423,9 +455,26 @@ export const QuestionBankDashboard: React.FC = () => {
                     year: 'numeric', month: 'short', day: 'numeric'
                   })}
                 </span>
-                <span className="text-xs font-black text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-xl">
-                  {bank.items?.length || 0} أسئلة
-                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedBankId(bank.id!);
+                      setTimeout(() => {
+                        window.print();
+                      }, 250);
+                    }}
+                    className="text-amber-800 hover:text-amber-950 bg-amber-50 hover:bg-amber-100 border border-amber-200/90 px-2 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer shadow-2xs"
+                    title="معاينة الطباعة / حفظ كـ PDF"
+                  >
+                    <Printer size={13} />
+                    <span>معاينة الطباعة / PDF</span>
+                  </button>
+                  <span className="text-xs font-black text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded-xl">
+                    {bank.items?.length || 0} أسئلة
+                  </span>
+                </div>
               </div>
             </motion.div>
           ))}
