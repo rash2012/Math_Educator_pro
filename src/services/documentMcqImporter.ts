@@ -1,23 +1,15 @@
-import { GoogleGenAI } from '@google/genai';
+import { callServerGemini } from './geminiClient';
 // @ts-ignore
 import mammoth from 'mammoth';
 import { extractPdfText } from './pdf';
 import { QuestionBankItem } from '../db';
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    }
-  }
-});
-
 const MODELS = [
   'gemini-3.8-flash',
-  'gemini-4-argon',
+  'gemini-3.5-flash',
   'gemini-flash-latest',
-  'gemini-3.1-pro-preview'
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash-lite'
 ];
 
 export interface ExtractedMCQCandidate {
@@ -159,32 +151,20 @@ export async function extractTextFromDocument(file: File): Promise<{
  * Call Gemini with model fallback
  */
 async function callGeminiWithFallback(contents: any, config?: any): Promise<string> {
-  let lastError: any = null;
-
-  for (const model of MODELS) {
-    try {
-      const response = await ai.models.generateContent({
-        model,
-        contents,
-        config: config || {
-          temperature: 0.2,
-          responseMimeType: 'application/json'
-        }
-      });
-      if (response && response.text) {
-        return response.text;
-      }
-    } catch (err: any) {
-      console.warn(`Model ${model} failed, trying next fallback:`, err);
-      lastError = err;
-      // Sleep slightly on 429
-      if (err?.status === 429 || err?.message?.includes('429') || err?.message?.includes('quota')) {
-        await new Promise(r => setTimeout(r, 1500));
-      }
+  const response = await callServerGemini({
+    models: MODELS,
+    contents,
+    config: config || {
+      temperature: 0.2,
+      responseMimeType: 'application/json'
     }
+  });
+
+  if (response && response.text) {
+    return response.text;
   }
 
-  throw lastError || new Error('فشل استدعاء الذكاء الاصطناعي لتحليل المستند');
+  throw new Error('فشل استدعاء الذكاء الاصطناعي لتحليل المستند');
 }
 
 /**
@@ -254,7 +234,7 @@ export async function parseAndEnrichMCQsFromDocumentText(
 2. إثراء السؤال ببيانات المنهاج:
    - "topic": اقتراح المفهوم أو الفكرة الرياضية الدقيقة للوحدة (مثال: "دراسة تغيرات تابع لوغاريتمي"، "معادلة المستوي المحوري"، "حساب نهاية تابع مثلثي").
    - "difficulty": اقتراح درجة الصعوبة من 1 إلى 5 نجوم (1=مباشر بسيط، 2=تطبيق قاعدي، 3=متوسط امتحاني، 4=مركب، 5=تميز وإبداع).
-   - "solution": الحل المقترح النموذجي التفصيلي والمبرر رياضياً خطوة بخطوة مع توضيح سبب اختيار الإجابة الصحيحة وتفنيد المشتتات، وفق سلم التصحيح المعتمد.
+   - "solution": استراتيجية الحل للأسئلة الموضوعية (الاختيار من متعدد): إذا كان حل السؤال يتيح استبعاد الخيارات الخاطئة بسرعة والتحقق من المعطيات (مثل تعويض قيم $n=0$ أو $n=1$ أو قيم خاصة، أو اختبار الشروط)، فيجب أن يعتمد الحل على (استراتيجية حذف الإجابات الخاطئة وتجريب الخيارات أو التعويض السريع) لأنها أسرع بكثير من الطريقة النموذجية التقليدية الطويلة؛ أما إذا كان التمرين تطبيق قانون مباشر والحل النموذجي أبسط وأسرع، فيُستخدم الحل النموذجي المباشر. يوضح الحل بطريقة تربوية تدريبية مبسطة.
    - "aiGuidance": تنبيه أو إرشاد مفاهيمي ذكي من الفخاخ والمطبات الامتحانية الشائعة في هذا السؤال.
 3. القواعد الرياضية واللغوية السورية الصارمة (إلزامية 100%):
    - استخدام علامة الدولار المفردة $...$ حصراً لكافة الرموز والمعادلات الرياضية (يُمنع منعاً باتاً استخدام $$...$$).

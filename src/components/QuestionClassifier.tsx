@@ -7,6 +7,7 @@ import { Loader2, Save, Filter, RefreshCw, CheckSquare, Square, CheckCircle2, Al
 import { MathRenderer } from './MathRenderer';
 import { safeParseJson } from '../utils/safeJson';
 import { resolveUnitUuid, isUuid, cleanArabicUnitName } from '../utils/unitResolver';
+import { callServerGemini } from '../services/geminiClient';
 
 interface Props {
   unitId: string;
@@ -281,12 +282,6 @@ export const QuestionClassifier: React.FC<Props> = ({ unitId, onClose, onSavedSu
         }
       } catch (e) {}
 
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) throw new Error('مفتاح Gemini API غير مهيأ');
-      
-      const { GoogleGenAI } = await import('@google/genai');
-      const ai = new GoogleGenAI({ apiKey });
-
       const prompt = `أنت خبير إعداد مناهج رياضية متقدم في المنهاج السوري للرياضيات (الثالث الثانوي العلمي).
 قم بتوليد 4 إلى 5 أسئلة موضوعية جديدة كلياً وعالية الجودة (اختيار من متعدد مع 4 خيارات وإجابة صحيحة من 0 إلى 3 وحل تفصيلي) لاختبار الوحدة الشامل.
 
@@ -320,9 +315,10 @@ ${misconceptionsText.substring(0, 2000)}
   }
 ]`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.5-flash-lite',
-        contents: [{ role: 'user', parts: [{ text: prompt }] }]
+      const response = await callServerGemini({
+        models: ['gemini-3.5-flash-lite', 'gemini-3.8-flash'],
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: { responseMimeType: 'application/json' }
       });
 
       const text = response.text || '';

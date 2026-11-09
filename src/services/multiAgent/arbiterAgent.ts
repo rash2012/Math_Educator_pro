@@ -19,26 +19,19 @@
  * 4. Tag & typography rules (**عبارة** only for inline highlight, headings in red/blue)
  */
 
-import { GoogleGenAI } from "@google/genai";
+import { callServerGemini } from "../geminiClient";
 import { ValidatorAgent } from "./validatorAgent";
 import { ValidationIssue } from "./types";
 import { safeParseJson } from "../../utils/safeJson";
 
 // Independent Arbiter Models Pool (Prioritizes Deep Reasoning and STEM Verification)
 export const INDEPENDENT_ARBITER_MODELS = [
-  "gemini-3.1-pro-preview", // Premier complex STEM reasoning model
-  "gemini-2.5-pro",         // Advanced reasoning fallback
-  "gemini-3.8-flash"        // High-speed fallback
+  "gemini-3.8-flash",
+  "gemini-3.5-flash",
+  "gemini-flash-latest",
+  "gemini-3.1-flash-lite",
+  "gemini-3.5-flash-lite",
 ];
-
-const arbiterAi = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build-arbiter',
-    }
-  }
-});
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -54,7 +47,7 @@ function selectIndependentModel(generatorModelUsed?: string): string[] {
 }
 
 /**
- * Execute request on the independent arbiter model with retry fallback
+ * Execute request on the independent arbiter model via server proxy
  */
 async function callArbiterModel(
   prompt: string,
@@ -62,33 +55,27 @@ async function callArbiterModel(
   responseMimeType: "text/plain" | "application/json" = "text/plain"
 ): Promise<string> {
   const models = selectIndependentModel(generatorModelUsed);
-  let lastError: any = null;
-
-  for (const model of models) {
-    try {
-      console.log(`[Arbiter Agent] ⚖️ Independent arbiter invoking model: ${model}...`);
-      const response = await arbiterAi.models.generateContent({
-        model,
-        contents: prompt,
-        config: {
-          temperature: 0.1, // Near zero temperature for strict mathematical precision and arbitration
-          responseMimeType,
-        }
-      });
-
-      const text = response.text || '';
-      if (text.trim()) {
-        console.log(`[Arbiter Agent] ✅ Independent audit completed with model: ${model}`);
-        return text;
+  try {
+    console.log(`[Arbiter Agent] ⚖️ Independent arbiter invoking server proxy with models:`, models);
+    const res = await callServerGemini({
+      models,
+      contents: prompt,
+      config: {
+        temperature: 0.1, // Near zero temperature for strict mathematical precision and arbitration
+        responseMimeType,
       }
-    } catch (err: any) {
-      console.warn(`[Arbiter Agent] ⚠️ Model ${model} failed in arbiter step: ${err?.message || err}`);
-      lastError = err;
-      await delay(800);
-    }
-  }
+    });
 
-  throw lastError || new Error("Failed to get response from independent arbiter models.");
+    const text = res.text || '';
+    if (text.trim()) {
+      console.log(`[Arbiter Agent] ✅ Independent audit completed with model: ${res.modelUsed || models[0]}`);
+      return text;
+    }
+    return text;
+  } catch (err: any) {
+    console.warn(`[Arbiter Agent] ⚠️ Server arbiter failed: ${err?.message || err}`);
+    throw err;
+  }
 }
 
 /**
@@ -520,7 +507,7 @@ ${JSON.stringify(chunk, null, 2)}
 المطلوب منك بصفتك الوكيل المحكّم والمدقق العلمي والرياضي المستقل (Layer 4 Critic & LaTeX Verifier):
 1. التدقيق الرياضي والمنطقي 100% للصياغة والحل:
    - افحص نص كل سؤال بدقة وتأكد من سلامة المعطيات الرياضية والصياغة العلمية.
-   - افحص الحل النموذجي (solution) خطوة بخطوة حسابياً وجبرياً وهندسياً. إذا كان هناك أي خطأ في الحساب أو الإشارة أو التبسيط أو النتيجة، صححه فوراً.
+   - افحص الحل النموذجي (solution) للأسئلة الموضوعية (اختيار من متعدد): استخدم الاستراتيجية التكيفية الذكية: إذا كان حل السؤال يتيح استبعاد الخيارات الخاطئة بسرعة عبر تعويض القيم والشروط (مثل تعويض $n=0$ أو $n=1$ كما في المتتاليات)، فيجب شرح (استراتيجية حذف الإجابات الخاطئة وتجريب الخيارات أو التعويض السريع) لأنها أسرع وأسهل بكثير من الطريقة النموذجية الطويلة؛ أما إذا كان السؤال تطبيق قانون مباشر والحل النموذجي أسرع، فليعتمد الحل النموذجي المباشر.
    - في أسئلة الاختيار من متعدد: تأكد بنسبة 100% أن الخيار المحدد كإجابة صحيحة (correctIndex أو correct_index) يطابق النتيجة الرياضية الصحيحة تماماً. إذا كان الخيار الصحيح في موقع مختلف، صحح قيمة correctIndex أو عدل نصوص الخيارات (subParts).
    - في الأسئلة المقالية والتمارين: نسق الحل بترقيم دائري للخطوات ① ② ③ ④ مع إبراز النتيجة.
 

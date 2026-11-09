@@ -106,6 +106,10 @@ const cleanSubpartText = (text: string): string => {
 const getCleanOptionText = (text: string): string => {
   if (!text) return '';
   let cleaned = text.trim();
+  // Strip circled numbers ① to ⑳
+  cleaned = cleaned.replace(/^\s*[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]\s*/, '');
+  // Strip digits list prefixes: 1., 2., (1), 1-, [1]
+  cleaned = cleaned.replace(/^\s*[\(\[]?[0-9١٢٣٤٥٦٧٨٩٠]+[\)\]\.\-\:\,\s]+\s*/, '');
   // Remove (أ) , (ب) , (ج) , (د) or (A) , (B) , (C) , (D)
   cleaned = cleaned.replace(/^\s*[\[\(\]\}]?[أبجدA-Da-d][\]\)\s\-\.\:\,]+/i, '');
   // Clean any residual opening/closing markers or periods
@@ -856,10 +860,15 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
   const applyReviewedFixes = () => {
     if (!reviewingItemId || !reviewReport || !reviewReport.suggestedFix) return;
     
+    const targetId = reviewingItemId;
     setBank(prev => {
       const updatedItems = prev.items?.map(item => {
-        if (item.id === reviewingItemId) {
+        if (item.id === targetId) {
           const fix = reviewReport.suggestedFix!;
+          let finalSubParts = fix.subParts ?? item.subParts;
+          if (isMCQItem(item) && Array.isArray(finalSubParts)) {
+            finalSubParts = finalSubParts.map(getCleanOptionText);
+          }
           return {
             ...item,
             topic: fix.topic ?? item.topic,
@@ -867,7 +876,7 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
             solution: fix.solution ?? item.solution,
             aiGuidance: fix.aiGuidance ?? item.aiGuidance,
             difficulty: fix.difficulty ?? item.difficulty,
-            subParts: fix.subParts ?? item.subParts
+            subParts: finalSubParts
           };
         }
         return item;
@@ -879,6 +888,7 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
       };
     });
 
+    setShowSolution(prev => ({ ...prev, [targetId]: true }));
     setReviewingItemId(null);
     setReviewReport(null);
   };
@@ -1944,16 +1954,86 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({ bankId, isNe
                             <MathRenderer content={reviewReport.analysis} />
                           </div>
 
-                          {reviewReport.status === 'needs_fixes' && reviewReport.suggestedFix && (
-                            <div className="border-t pt-4 flex justify-end">
-                              <button
-                                onClick={applyReviewedFixes}
-                                className="flex items-center gap-2 px-5 py-2.5 bg-purple-600 text-white font-extrabold rounded-lg hover:bg-purple-700 transition shadow-sm text-sm"
-                              >
-                                تطبيق التعديلات المقترحة فوراً ✨
-                              </button>
+                          {/* معاينة السؤال والحل الجديد المدقق قبل اعتماده */}
+                          {reviewReport.suggestedFix && (
+                            <div className="mt-4 p-5 bg-white border-2 border-purple-200 rounded-2xl space-y-4 shadow-sm text-right" dir="rtl">
+                              <div className="flex items-center gap-2 text-xs font-black text-purple-900 border-b border-purple-100 pb-2.5">
+                                <Sparkles size={16} className="text-purple-600" />
+                                <span>معاينة السؤال والحل الجديد بعد التدقيق (قبل اعتماده):</span>
+                              </div>
+
+                              {reviewReport.suggestedFix.question && (
+                                <div className="space-y-1">
+                                  <span className="text-[11px] font-black text-gray-500">نص السؤال المدقق:</span>
+                                  <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-gray-800 leading-relaxed">
+                                    <MathRenderer content={reviewReport.suggestedFix.question} />
+                                  </div>
+                                </div>
+                              )}
+
+                              {isMCQItem(item) && reviewReport.suggestedFix.subParts && reviewReport.suggestedFix.subParts.length >= 4 && (
+                                <div className="space-y-1.5">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-[11px] font-black text-indigo-700">صناديق الخيارات الأربعة (بدون أي ترقيم داخلي):</span>
+                                    <span className="text-[10px] text-gray-400 font-bold">* الحروف A, B, C, D تظهر كترويسة الصناديق فقط</span>
+                                  </div>
+                                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                    {reviewReport.suggestedFix.subParts.slice(0, 4).map((opt, oIdx) => (
+                                      <div key={oIdx} className="p-2.5 bg-indigo-50/50 border border-indigo-200 rounded-xl text-center text-xs font-bold text-indigo-950 flex flex-col items-center justify-center min-h-[50px]">
+                                        <span className="inline-block bg-indigo-600 text-white text-[10px] font-black px-2 py-0.5 rounded-full mb-1">
+                                          {String.fromCharCode(65 + oIdx)}
+                                        </span>
+                                        <MathRenderer content={getCleanOptionText(opt)} />
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {reviewReport.suggestedFix.solution && (
+                                <div className="space-y-1.5">
+                                  <div className="flex items-center gap-1.5 text-xs font-black text-emerald-800">
+                                    <Check size={16} className="text-emerald-600" />
+                                    <span>الحل الجديد المدقق (استراتيجية استبعاد المشتتات / الحل المباشر):</span>
+                                  </div>
+                                  <div className="p-4 bg-emerald-50/70 border-2 border-emerald-300 rounded-xl text-sm text-emerald-950 leading-relaxed font-semibold">
+                                    <MathRenderer content={reviewReport.suggestedFix.solution} />
+                                  </div>
+                                </div>
+                              )}
+
+                              {reviewReport.suggestedFix.aiGuidance && (
+                                <div className="space-y-1">
+                                  <span className="text-[11px] font-black text-amber-800">إرشاد تربوي وتحذير من الفخاخ:</span>
+                                  <div className="p-2.5 bg-amber-50/70 border border-amber-200 rounded-xl text-xs text-amber-900 font-bold">
+                                    <MathRenderer content={reviewReport.suggestedFix.aiGuidance} />
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           )}
+
+                          <div className="border-t pt-4 flex items-center justify-between gap-3">
+                            <button
+                              onClick={() => {
+                                setReviewingItemId(null);
+                                setReviewReport(null);
+                              }}
+                              className="px-4 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold rounded-xl text-xs transition"
+                            >
+                              إغلاق دون تعديل
+                            </button>
+
+                            {reviewReport.suggestedFix && (
+                              <button
+                                onClick={applyReviewedFixes}
+                                className="flex items-center gap-2 px-6 py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-black rounded-xl transition shadow-lg shadow-purple-600/20 text-sm cursor-pointer"
+                              >
+                                <Check size={16} />
+                                <span>اعتماد الحل والتدقيق الجديد فوراً ✨</span>
+                              </button>
+                            )}
+                          </div>
                         </div>
                       ) : null}
                     </div>

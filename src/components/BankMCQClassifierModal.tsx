@@ -11,6 +11,7 @@ import { safeParseJson } from '../utils/safeJson';
 import { resolveUnitUuid, isUuid, cleanArabicUnitName } from '../utils/unitResolver';
 import { fetchUnitDistinctConcepts } from '../services/bankSyncSimple';
 import { correctionAgent } from '../services/correctionAgent';
+import { callServerGemini } from '../services/geminiClient';
 
 interface Props {
   unitName: string;
@@ -119,12 +120,6 @@ export const BankMCQClassifierModal: React.FC<Props> = ({
         return;
       }
 
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) throw new Error('مفتاح Gemini API غير مهيأ');
-
-      const { GoogleGenAI } = await import('@google/genai');
-      const ai = new GoogleGenAI({ apiKey });
-
       const batchSize = 6;
       const updatedList = [...bankMCQList];
 
@@ -161,9 +156,10 @@ ${batch.map((q, idx) => `###Q ${q.id}
   }
 ]`;
 
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.5-flash-lite',
-          contents: [{ role: 'user', parts: [{ text: prompt }] }]
+        const response = await callServerGemini({
+          models: ['gemini-3.5-flash-lite', 'gemini-3.8-flash'],
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          config: { responseMimeType: 'application/json' }
         });
 
         const text = response.text || '';
@@ -279,12 +275,6 @@ ${batch.map((q, idx) => `###Q ${q.id}
 
       const allForbiddenTexts = [...existingBankTexts, ...existingQuizTexts];
 
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) throw new Error('مفتاح Gemini API غير مهيأ');
-
-      const { GoogleGenAI } = await import('@google/genai');
-      const ai = new GoogleGenAI({ apiKey });
-
       const prompt = `أنت خبير إعداد بنوك الأسئلة للمنهاج السوري للرياضيات (الثالث الثانوي العلمي).
 قم بتحليل ومسح شامل للوحدة الدراسية: "${unitName}".
 المرجع الأساسي المعتمد هو شرح الدروس والملخص النظري المنسق للوحدة والفخاخ الامتحانية والمطبات أدناه:
@@ -302,7 +292,9 @@ ${unitContentForAI.substring(0, 4500) || 'شرح مفاهيم الوحدة ال�
    يجب تنويع الأسئلة لتشمل كافة المستويات من السهل إلى المهارات العليا.
 4. سلامة LaTeX الرياضي: كتابة المعادلات داخل علامة الدولار المفردة $...$ حصراً، مع الحفاظ الكامل على كافة الأوامر البرمجية والشرطات المائلة (مثل \\frac, \\sqrt, \\lim, \\to, \\ln, \\exp, \\vec, \\overrightarrow, \\alpha, \\beta).
 5. الالتزام بالمنهاج السوري: استخدام مصطلح "تابع" حصراً، منع الجداء الشعاعي الخارجي، منع رمز السيجما sum للمجاميع.
-6. توليد عدد ${genCount} أسئلة موضوعية (اختيار من متعدد MCQ) مع 4 خيارات (أ، ب، ج، د)، رقم الخيار الصحيح (index من 0 إلى 3)، حل نموذجي تفصيلي، وتصنيف المفهوم ومستوى النجوم.
+6. توليد عدد ${genCount} أسئلة موضوعية (اختيار من متعدد MCQ) مع 4 خيارات حصرية ومشتتات ذكية.
+   - [قاعدة حظر الترقيم داخل صناديق الخيارات]: يُمنع منعاً باتاً وضع أي ترقيم أو رموز أو أحرف دائرية أو لاتينية أو عربية (مثل ① ② أو 1. 2. أو أ) ب) أو A B) داخل مصفوفة خيارات الإجابة subParts. كل خيار يجب أن يحتوي على العبارة الرياضية المجردة فقط.
+   - [استراتيجية الحل للأسئلة الموضوعية]: إذا كان حذف الإجابات الخاطئة من المشتتات ممكناً وأسرع من الحل النموذجي للتمرين (كما في المتتاليات بتعويض قيم $n=0$ أو $n=1$، أو تعويض قيم خاصة أو شروط المعطيات)، فنطبق استراتيجية "حذف الإجابات الخاطئة بالاستفادة من المشتتات وسياق التمرين"، مع توضيح خطوات فحص الخيارات واستبعاد المتناقضة مع الفرض؛ أما إذا كان التمرين تطبيق قانون مباشر والحل النموذجي أسرع، فيُستخدم الحل النموذجي المباشر.
 
 الأسئلة الحالية الممنوع تكرارها مطلقاً:
 ${allForbiddenTexts.slice(-30).join('\n---\n') || 'لا توجد أسئلة سابقة'}
@@ -311,17 +303,18 @@ ${allForbiddenTexts.slice(-30).join('\n---\n') || 'لا توجد أسئلة سا
 [
   {
     "question": "نص السؤال الرياضي...",
-    "subParts": ["أ) ...", "ب) ...", "ج) ...", "د) ..."],
+    "subParts": ["صيغة الخيار الأول فقط بدون أ) أو ترقيم", "صيغة الخيار الثاني فقط...", "صيغة الخيار الثالث فقط...", "صيغة الخيار الرابع فقط..."],
     "correct_index": 0,
     "difficulty": 3,
     "topic": "المفهوم الرياضي",
-    "solution": "الحل النموذجي المعتمد وتفسير المشتتات والخطوات..."
+    "solution": "الحل النموذجي المعتمد وفق الاستراتيجية (استبعاد المشتتات أو الحل المباشر)..."
   }
 ]`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.5-flash-lite',
-        contents: [{ role: 'user', parts: [{ text: prompt }] }]
+      const response = await callServerGemini({
+        models: ['gemini-3.5-flash-lite', 'gemini-3.8-flash'],
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: { responseMimeType: 'application/json' }
       });
 
       const text = response.text || '';
@@ -331,14 +324,24 @@ ${allForbiddenTexts.slice(-30).join('\n---\n') || 'لا توجد أسئلة سا
         throw new Error('فشل توليد وتنسيق الأسئلة الذكية من الذكاء الاصطناعي');
       }
 
+      const cleanOptionBox = (opt: any) => {
+        if (typeof opt !== 'string') return opt || '';
+        return opt
+          .replace(/^\s*[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]\s*/, '')
+          .replace(/^\s*[\(\[]?[0-9١٢٣٤٥٦٧٨٩٠]+[\)\]\.\-\:\,\s]+\s*/, '')
+          .replace(/^\s*[\[\(\]\}]?[أبجدA-Da-d][\]\)\s\-\.\:\,]+/i, '')
+          .replace(/^\s*[أبجدA-Da-d]\s*[\)\-\.]\s*/i, '')
+          .trim();
+      };
+
       const formatted = newItems.map((item: any, idx: number) => ({
         id: crypto.randomUUID(),
         order: bankMCQList.length + idx + 1,
         type: 'mcq' as const,
         question: item.question || '',
         subParts: Array.isArray(item.subParts) && item.subParts.length === 4 
-          ? item.subParts 
-          : ['أ) ...', 'ب) ...', 'ج) ...', 'د) ...'],
+          ? item.subParts.map(cleanOptionBox)
+          : ['الخيار الأول', 'الخيار الثاني', 'الخيار الثالث', 'الخيار الرابع'],
         correct_index: Number(item.correct_index) || 0,
         difficulty: Math.max(1, Math.min(5, Number(item.difficulty) || 3)),
         topic: item.topic || unitName,

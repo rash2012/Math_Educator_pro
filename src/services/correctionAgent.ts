@@ -14,27 +14,19 @@
  * 4. تطبيق ضوابط الهوية البصرية والوسوم (**عبارة** داخل الشرح فقط بدون إطار ولون بنفسجي، العناوين بالأحمر والأزرق).
  */
 
-import { GoogleGenAI } from "@google/genai";
+import { callServerGemini } from "./geminiClient";
 import { ValidatorAgent } from "./multiAgent/validatorAgent";
 import { IndependentArbiterAgent } from "./multiAgent/arbiterAgent";
 import { globalOrchestrator } from "./multiAgent/orchestrator";
 
 // قائمة نماذج المحكّم المستقل (نماذج تفكير استنتاجي عميق منفصلة عن نموذج التوليد الأساسي)
 export const CORRECTION_AGENT_MODELS = [
-  "gemini-3.1-pro-preview", // النموذج الأساسي للمحكّم المستقل (Deep Reasoning & STEM)
-  "gemini-2.5-pro",         // نموذج تفكير احتياطي متقدم
-  "gemini-3.1-flash-lite",  // نموذج سريع احتياطي معزول
+  "gemini-3.8-flash",
+  "gemini-3.5-flash",
+  "gemini-flash-latest",
+  "gemini-3.1-flash-lite",
+  "gemini-3.5-flash-lite",
 ];
-
-// تهيئة عميل Gemini مستقل مخصص للمحكّم
-const correctionAi = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build-correction-agent',
-    }
-  }
-});
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -50,7 +42,7 @@ function getIndependentModels(generatorModelUsed?: string): string[] {
 }
 
 /**
- * استدعاء نموذج المحكّم المستقل مع دعم المحاولات البديلة
+ * استدعاء نموذج المحكّم المستقل عبر الخادم
  */
 async function callIndependentReviewerModel(
   prompt: string,
@@ -58,33 +50,25 @@ async function callIndependentReviewerModel(
   responseMimeType: "text/plain" | "application/json" = "text/plain"
 ): Promise<{ text: string; modelUsed: string }> {
   const models = getIndependentModels(generatorModelUsed);
-  let lastError: any = null;
-
-  for (const model of models) {
-    try {
-      console.log(`[correctionAgent] ⚖️ Independent reviewer invoking separate model: ${model}...`);
-      const response = await correctionAi.models.generateContent({
-        model,
-        contents: prompt,
-        config: {
-          temperature: 0.1, // درجة حرارة منخفضة جداً للصرامة العلمية والحياد التام
-          responseMimeType,
-        }
-      });
-
-      const text = response.text || '';
-      if (text.trim()) {
-        console.log(`[correctionAgent] ✅ Independent review completed successfully via model: ${model}`);
-        return { text, modelUsed: model };
+  try {
+    console.log(`[correctionAgent] ⚖️ Independent reviewer invoking server proxy with models:`, models);
+    const res = await callServerGemini({
+      models,
+      contents: prompt,
+      config: {
+        temperature: 0.1, // درجة حرارة منخفضة جداً للصرامة العلمية والحياد التام
+        responseMimeType,
       }
-    } catch (err: any) {
-      console.warn(`[correctionAgent] ⚠️ Model ${model} encountered an issue: ${err?.message || err}`);
-      lastError = err;
-      await delay(750);
-    }
-  }
+    });
 
-  throw lastError || new Error("Failed to get response from independent correction agent models.");
+    const text = res.text || '';
+    const modelUsed = res.modelUsed || models[0];
+    console.log(`[correctionAgent] ✅ Independent review completed successfully via model: ${modelUsed}`);
+    return { text, modelUsed };
+  } catch (err: any) {
+    console.warn(`[correctionAgent] ⚠️ Server review encountered an issue: ${err?.message || err}`);
+    throw err;
+  }
 }
 
 /**
@@ -163,6 +147,7 @@ export class CorrectionAgentService {
       title?: string;
       unit?: string;
       generatorModel?: string;
+      isMCQ?: boolean;
     }
   ): Promise<string> {
     if (!solutionText || typeof solutionText !== 'string' || solutionText.trim().length === 0) {
@@ -180,6 +165,7 @@ ${INDEPENDENT_REVIEWER_GUIDELINES}
 
 [طلب التحكيم والتدقيق لحل رياضي]:
 الموضوع / الوحدة: "${context?.unit || context?.title || 'رياضيات الثالث الثانوي العلمي'}"
+نوع السؤال: ${context?.isMCQ ? 'سؤال اختيار من متعدد موضوعي (MCQ)' : 'مسألة أو تمرين'}
 ${context?.questionText ? `نص السؤال أو المسألة الأصلية:\n"""${context.questionText}"""\n` : ''}
 
 نص الحل المراد تدقيقه وتصحيحه:
@@ -190,11 +176,15 @@ ${currentSolution}
 المطلوب:
 1. افحص خطوات الحل الحسابية والمنطقية، وتأكد من صحة النتيجة الرياضية والتعليلات 100%.
 2. صحح أي خطأ حسابي أو منطقي، وأي خطأ في كود LaTeX.
-3. تأكد من قاعدة الدولار المفرد $...$، وتفريق الأشعة (\\vec{u} بحرف واحد، \\overrightarrow{AB} بحرفين)، والترقيم الدائري ① ② ③.
+3. تأكد من قاعدة الدولار المفرد $...$، وتفريق الأشعة (\\vec{u} بحرف واحد، \\overrightarrow{AB} بحرفين).
+${context?.isMCQ ? `
+4. في الأسئلة الموضوعية (اختيار من متعدد): يجب الالتزام باستراتيجية تدريب الطالب الذكية: إذا كان حذف الإجابات الخاطئة من المشتتات ممكناً وأسرع من الحل التقليدي الطويل (كما في تعويض $n=0$ أو $n=1$ في المتتاليات، أو الشروط الخاصة)، فيعتمد الحل استراتيجية حذف المشتتات والتعويض السريع أولاً مع التنبيه لعدم التوقف عند تحقق خيار واحد بل فحص باقي الخيارات، أما إذا كان السؤال تطبيق قانون مباشر فيعتمد الحل النموذجي المباشر.
+` : `
 4. حظر وضع الاستراتيجية داخل نص الحل (correctedSolution): يُمنع منعاً باتاً وضع أو إبقاء عنوان أو فقرة "فكرة واستراتيجية الحل" داخل نص الحل؛ نص الحل مخصص حصراً لخطوات وإجابات وحلول الطلبات، وإذا وجدت فقرة استراتيجية الحل في بداية النص احذفها تماماً من نص الحل.
+`}
 5. أخرج النتيجة بصيغة JSON حصراً بهذا المخطط:
 {
-  "correctedSolution": "نص الحل الكامل بعد التدقيق والتصحيح والتنقيح الشامل بدون فقرة الاستراتيجية...",
+  "correctedSolution": "نص الحل الكامل بعد التدقيق والتصحيح والتنقيح الشامل...",
   "hasErrorsFixed": true,
   "summaryOfFixes": "ملخص ما تم تصحيحه إن وجد"
 }
@@ -218,11 +208,13 @@ ${currentSolution}
       console.warn("[correctionAgent] Fallback to deterministic rules for solution:", err);
     }
 
-    // إزالة أي تسرب لعنوان أو فقرة الاستراتيجية من نص الحل لضمان حصرية وضعها في الحاوية المخصصة
-    currentSolution = currentSolution
-      .replace(/(?:^|\n)(?:[*\s#💡]*)(?:فكرة\s*واستراتيجية\s*الحل|استراتيجية\s*الحل|استراتيجية\s+[^\n*]{3,60})(?:[*:#\s]*)([\s\S]*?)(?=(?:\n\s*(?:\*(?:حل\s+الطلب|الطلب|الحل|خطوات\s+الحل|الإثبات|البرهان|طريقة\s+الحل|المرحلة)|①|②|1\.|2\.|\*#[^#]+#\*))|$)/i, '')
-      .replace(/^(?:[*\s#💡]*)(?:فكرة\s*واستراتيجية\s*الحل|استراتيجية\s*الحل)[^\n]*\n+/i, '')
-      .trim();
+    // إزالة أي تسرب لعنوان أو فقرة الاستراتيجية من نص الحل لضمان حصرية وضعها في الحاوية المخصصة (فقط للدروس والمسائل غير الموضوعية)
+    if (!context?.isMCQ) {
+      currentSolution = currentSolution
+        .replace(/(?:^|\n)(?:[*\s#💡]*)(?:فكرة\s*واستراتيجية\s*الحل|استراتيجية\s*الحل|استراتيجية\s+[^\n*]{3,60})(?:[*:#\s]*)([\s\S]*?)(?=(?:\n\s*(?:\*(?:حل\s+الطلب|الطلب|الحل|خطوات\s+الحل|الإثبات|البرهان|طريقة\s+الحل|المرحلة)|①|②|1\.|2\.|\*#[^#]+#\*))|$)/i, '')
+        .replace(/^(?:[*\s#💡]*)(?:فكرة\s*واستراتيجية\s*الحل|استراتيجية\s*الحل)[^\n]*\n+/i, '')
+        .trim();
+    }
 
     // المرحلة الثالثة: صمام أمان إضافي للتحقق من أقواس ودولارات LaTeX
     const postRepair = ValidatorAgent.validateAndRepairLatex(currentSolution);

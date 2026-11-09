@@ -1,5 +1,5 @@
 import { supabase } from './supabaseClient';
-import { GoogleGenAI } from '@google/genai';
+import { callServerGemini } from './geminiClient';
 
 export interface ClassificationTarget {
   id: string;
@@ -79,13 +79,6 @@ export async function classifyQuestionsBatch(
   const batchSize = 8;
   const models = ['gemini-3.5-flash-lite', 'gemini-3.8-flash'];
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('مفتاح Gemini API غير مهيأ');
-  }
-
-  const ai = new GoogleGenAI({ apiKey });
-
   for (let i = 0; i < targets.length; i += batchSize) {
     const batch = targets.slice(i, i + batchSize);
     const batchNum = Math.floor(i / batchSize) + 1;
@@ -119,64 +112,44 @@ CONCEPT: <نص حرفي مطابق تماماً لأحد المفاهيم في �
 REASON: <جملة واحدة توضيحية باللغة العربية>
 `;
 
-    let batchSuccess = false;
-    let lastError: any = null;
+    try {
+      const response = await callServerGemini({
+        models,
+        contents: [{ role: 'user', parts: [{ text: prompt }] }]
+      });
 
-    for (const modelName of models) {
-      try {
-        const response = await ai.models.generateContent({
-          model: modelName,
-          contents: [{ role: 'user', parts: [{ text: prompt }] }]
-        });
+      const text = response.text || '';
+      const blocks = text.split('###Q ').slice(1);
 
-        const text = response.text || '';
-        const blocks = text.split('###Q ').slice(1);
+      for (const block of blocks) {
+        const lines = block.split('\n');
+        const id = lines[0]?.trim();
+        const levelMatch = block.match(/LEVEL:\s*([1-4])/);
+        const conceptMatch = block.match(/CONCEPT:\s*(.+)/);
+        const reasonMatch = block.match(/REASON:\s*(.+)/);
 
-        for (const block of blocks) {
-          const lines = block.split('\n');
-          const id = lines[0]?.trim();
-          const levelMatch = block.match(/LEVEL:\s*([1-4])/);
-          const conceptMatch = block.match(/CONCEPT:\s*(.+)/);
-          const reasonMatch = block.match(/REASON:\s*(.+)/);
+        const target = batch.find(t => t.id === id);
+        if (target && levelMatch) {
+          const rawConcept = conceptMatch ? conceptMatch[1].trim() : 'غير محدد';
+          // Exact case-insensitive match against whitelist
+          const matchedConcept = concepts.find(c => c.toLowerCase() === rawConcept.toLowerCase()) || 'غير محدد';
 
-          const target = batch.find(t => t.id === id);
-          if (target && levelMatch) {
-            const rawConcept = conceptMatch ? conceptMatch[1].trim() : 'غير محدد';
-            // Exact case-insensitive match against whitelist
-            const matchedConcept = concepts.find(c => c.toLowerCase() === rawConcept.toLowerCase()) || 'غير محدد';
-
-            results.push({
-              target,
-              proposedLevel: Number(levelMatch[1]),
-              proposedConcept: matchedConcept,
-              reason: reasonMatch ? reasonMatch[1].trim() : 'تصنيف تلقائي',
-              selected: true
-            });
-          }
-        }
-
-        batchSuccess = true;
-        break; // Success with current model
-      } catch (err: any) {
-        lastError = err;
-        const errStr = String(err?.message || err);
-        if (errStr.includes('429') || errStr.toLowerCase().includes('quota') || errStr.toLowerCase().includes('exhausted')) {
-          console.warn(`Model ${modelName} quota exhausted, trying fallback model...`);
-          continue; // Try next model in fallback array
-        } else {
-          // If other error, throw or retry
-          throw err;
+          results.push({
+            target,
+            proposedLevel: Number(levelMatch[1]),
+            proposedConcept: matchedConcept,
+            reason: reasonMatch ? reasonMatch[1].trim() : 'تصنيف تلقائي',
+            selected: true
+          });
         }
       }
+    } catch (err: any) {
+      throw new Error(err?.message || 'تم استنفاد الحصة أو فشل نموذج الذكاء الاصطناعي');
     }
 
-    if (!batchSuccess) {
-      throw new Error(lastError?.message || 'تم استنفاد الحصة اليومية لنموذج الذكاء الاصطناعي (Quota Exceeded)');
-    }
-
-    // Delay 2000ms between batches
+    // Delay 1000ms between batches
     if (i + batchSize < targets.length) {
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 1000));
     }
   }
 
@@ -201,8 +174,8 @@ LEVEL: <1-4>
 CONCEPT: <مفهوم أو غير محدد>
 REASON: <سبب>
 `;
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  const res = await ai.models.generateContent({
+
+  const res = await callServerGemini({
     model: 'gemini-3.5-flash-lite',
     contents: [{ role: 'user', parts: [{ text: prompt }] }]
   });

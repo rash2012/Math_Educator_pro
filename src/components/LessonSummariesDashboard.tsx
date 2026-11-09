@@ -673,28 +673,58 @@ export const LessonSummariesDashboard: React.FC = () => {
   const getSectionAdditions = (sec: LessonSection) => {
     const additions = sec.analysis?.additions || [];
     
-    const getAddition = (index: number, defaultLabel: string, alternativeLabels: string[] = []) => {
-      const itemByIndex = additions[index];
-      const itemByLabel = additions.find(a => 
-        a.label === defaultLabel || alternativeLabels.includes(a.label)
-      );
-      
-      const finalItem = itemByLabel || itemByIndex || { label: defaultLabel, content: '' };
+    const findAddition = (
+      defaultLabel: string, 
+      includeKeywords: string[], 
+      excludeKeywords: string[] = [],
+      fallbackRootValue?: string,
+      requireAllIncludes: boolean = false
+    ) => {
+      // 1. Search within additions by matching label keywords
+      const item = additions.find(a => {
+        if (!a || !a.label) return false;
+        const norm = a.label.trim();
+        if (norm === defaultLabel) return true;
+        const matchesInclude = requireAllIncludes
+          ? includeKeywords.every(kw => norm.includes(kw))
+          : includeKeywords.some(kw => norm.includes(kw));
+        const matchesExclude = excludeKeywords.some(kw => norm.includes(kw));
+        return matchesInclude && !matchesExclude;
+      });
+
+      // 2. If item found with content, use it
+      if (item && item.content !== undefined && item.content !== '') {
+        return {
+          label: item.label || defaultLabel,
+          content: item.content,
+          svgCode: item.svgCode || ''
+        };
+      }
+
+      // 3. Fallback to top-level section field if additions didn't contain content
+      if (fallbackRootValue !== undefined && fallbackRootValue !== '') {
+        return {
+          label: item?.label || defaultLabel,
+          content: fallbackRootValue,
+          svgCode: item?.svgCode || ''
+        };
+      }
+
       return {
-        label: finalItem.label || defaultLabel,
-        content: finalItem.content || '',
-        svgCode: finalItem.svgCode || ''
+        label: item?.label || defaultLabel,
+        content: item?.content || '',
+        svgCode: item?.svgCode || ''
       };
     };
 
-    const guidanceItem = getAddition(0, 'إرشادات ذكية', ['إرشادات ذكية للطالب']);
-    const notesItem = getAddition(1, 'ملاحظات هامة', ['ملاحظات ونتائج ذهبية', 'ملاحظات ونتائج ذهبية للفقرة']);
-    const trapsItem = getAddition(2, 'مطبات امتحانية', ['مطبات امتحانية وتحذيرات', 'مطب امتحاني - كُن حذراً']);
-    const examGuidanceItem = getAddition(3, 'الدليل الامتحاني', ['الدليل المنهجي للامتحان']);
-    const exampleItem = getAddition(4, 'تمرين تطبيقي', ['تطبيق عملي مكرّس للفهم (من الكتاب السوري)']);
-    const solutionItem = getAddition(5, 'الحل النموذجي', ['خطوات الحل المنهجي النموذجي']);
-    const extraExampleItem = getAddition(6, 'تمرين إضافي', ['تمرين إضافي مكرّس ذو صياغة ذكية من الذكاء الاصطناعي']);
-    const extraSolutionItem = getAddition(7, 'حل تمرين إضافي', ['الحل النموذجي المفصل للتمرين الإضافي']);
+    const guidanceItem = findAddition('إرشادات ذكية', ['إرشاد', 'توجيه'], ['ملاحظ', 'مطب', 'تمرين', 'حل', 'امتحان'], sec.guidance);
+    const notesItem = findAddition('ملاحظات هامة', ['ملاحظ', 'ذهبية', 'نتائج'], ['مطب', 'تحذير', 'امتحان', 'تمرين', 'حل', 'إرشاد'], sec.notes);
+    const trapsItem = findAddition('مطبات امتحانية', ['مطب', 'مطبات', 'تحذير', 'احذر', 'خطر'], ['إرشاد', 'ملاحظ'], sec.traps);
+    const examGuidanceItem = findAddition('الدليل الامتحاني', ['دليل', 'منهجي'], ['مطب', 'مطبات', 'تحذير'], sec.examGuidance);
+    const extraSolutionItem = findAddition('حل تمرين إضافي', ['إضافي', 'حل'], [], sec.extraSolutionText, true);
+    const extraExampleItem = findAddition('تمرين إضافي', ['إضافي', 'اضافي'], ['حل', 'إجابة', 'اجابة'], sec.extraExampleText);
+    const solutionItem = findAddition('الحل النموذجي', ['حل', 'إجابة', 'اجابة'], ['إضافي', 'اضافي'], sec.solutionText);
+    const exampleItem = findAddition('تمرين تطبيقي', ['تطبيق', 'تمرين'], ['إضافي', 'اضافي', 'حل', 'إجابة', 'اجابة'], sec.exampleText);
 
     return {
       guidanceLabel: guidanceItem.label,
@@ -1390,6 +1420,14 @@ export const LessonSummariesDashboard: React.FC = () => {
         conceptLabel: editSectionForm.conceptLabel ?? 'صياغة الفكرة بأسلوب الطالب والتبسيط العلمي الموجه:',
         practiceSectionLabel: editSectionForm.practiceSectionLabel ?? 'فقرة "تدرّب" من الكتاب المقرّر لهذا المفهوم:',
         practicalSectionLabel: editSectionForm.practicalSectionLabel ?? '📌 التطبيق العملي للفقرة من الكتاب:',
+        guidance: editSectionForm.guidance || '',
+        notes: editSectionForm.notes || '',
+        traps: editSectionForm.traps || '',
+        examGuidance: editSectionForm.examGuidance || '',
+        exampleText: editSectionForm.exampleText || '',
+        solutionText: editSectionForm.solutionText || '',
+        extraExampleText: editSectionForm.extraExampleText || '',
+        extraSolutionText: editSectionForm.extraSolutionText || '',
         analysis: {
           additions: [
             { label: editSectionForm.guidanceLabel, content: editSectionForm.guidance },
@@ -1862,14 +1900,14 @@ export const LessonSummariesDashboard: React.FC = () => {
 
       const currentAdditions = getSectionAdditions(section);
 
-      const updatedGuidance = fieldUpdates.guidance !== undefined ? fieldUpdates.guidance : (section.guidance || currentAdditions.guidance || '');
-      const updatedNotes = fieldUpdates.notes !== undefined ? fieldUpdates.notes : (section.notes || currentAdditions.notes || '');
-      const updatedTraps = fieldUpdates.traps !== undefined ? fieldUpdates.traps : (section.traps || currentAdditions.traps || '');
-      const updatedExamGuidance = fieldUpdates.examGuidance !== undefined ? fieldUpdates.examGuidance : (section.examGuidance || currentAdditions.examGuidance || '');
-      const updatedExampleText = fieldUpdates.exampleText !== undefined ? fieldUpdates.exampleText : (section.exampleText || currentAdditions.exampleText || '');
-      const updatedSolutionText = fieldUpdates.solutionText !== undefined ? fieldUpdates.solutionText : (section.solutionText || currentAdditions.solutionText || '');
-      const updatedExtraExampleText = fieldUpdates.extraExampleText !== undefined ? fieldUpdates.extraExampleText : (section.extraExampleText || currentAdditions.extraExampleText || '');
-      const updatedExtraSolutionText = fieldUpdates.extraSolutionText !== undefined ? fieldUpdates.extraSolutionText : (section.extraSolutionText || currentAdditions.extraSolutionText || '');
+      const updatedGuidance = fieldUpdates.guidance !== undefined ? fieldUpdates.guidance : (currentAdditions.guidance || section.guidance || '');
+      const updatedNotes = fieldUpdates.notes !== undefined ? fieldUpdates.notes : (currentAdditions.notes || section.notes || '');
+      const updatedTraps = fieldUpdates.traps !== undefined ? fieldUpdates.traps : (currentAdditions.traps || section.traps || '');
+      const updatedExamGuidance = fieldUpdates.examGuidance !== undefined ? fieldUpdates.examGuidance : (currentAdditions.examGuidance || section.examGuidance || '');
+      const updatedExampleText = fieldUpdates.exampleText !== undefined ? fieldUpdates.exampleText : (currentAdditions.exampleText || section.exampleText || '');
+      const updatedSolutionText = fieldUpdates.solutionText !== undefined ? fieldUpdates.solutionText : (currentAdditions.solutionText || section.solutionText || '');
+      const updatedExtraExampleText = fieldUpdates.extraExampleText !== undefined ? fieldUpdates.extraExampleText : (currentAdditions.extraExampleText || section.extraExampleText || '');
+      const updatedExtraSolutionText = fieldUpdates.extraSolutionText !== undefined ? fieldUpdates.extraSolutionText : (currentAdditions.extraSolutionText || section.extraSolutionText || '');
 
       const updatedAdditions = [
         { label: currentAdditions.guidanceLabel || 'إرشادات ذكية', content: updatedGuidance },
@@ -8175,17 +8213,6 @@ export const LessonSummariesDashboard: React.FC = () => {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                {/* Header Quick Save Button */}
-                <button
-                  type="button"
-                  onClick={() => handleSaveSubBlockEdit(false)}
-                  disabled={isSavingSubBlock}
-                  className="hidden sm:flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-500/90 hover:bg-emerald-500 text-white rounded-xl text-xs font-black shadow-xs transition-all cursor-pointer disabled:opacity-50"
-                  title="حفظ التعديلات في قاعدة البيانات دون الخروج من النافذة"
-                >
-                  {isSavingSubBlock ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-                  <span>{isSavingSubBlock ? 'جاري الحفظ...' : 'حفظ'}</span>
-                </button>
                 <button 
                   onClick={() => setEditingSubBlockModal(null)}
                   className="text-white/80 hover:text-white hover:bg-white/15 p-2 rounded-xl transition-all cursor-pointer"
@@ -8196,48 +8223,26 @@ export const LessonSummariesDashboard: React.FC = () => {
               </div>
             </div>
 
-            {/* Symbols Toolbar & Paragraph Icons & AI Rephrase Bar */}
-            <div className="bg-slate-50 border-b border-slate-200 p-3 shrink-0 flex flex-col gap-2.5 no-print">
-              <div className="flex flex-wrap items-center justify-between gap-2.5">
+            {/* Compact Toolbar: Numbering & Steps + Paragraph Icons + AI Rephrase Bar */}
+            <div className="bg-slate-50 border-b border-slate-200 px-3 py-2 shrink-0 flex flex-col gap-2 no-print">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 
-                {/* Math & Paragraph Symbols Toolbar */}
+                {/* Compact Toolbar Group */}
                 <div className="flex flex-wrap items-center gap-2 overflow-x-auto py-0.5 max-w-full">
-                  {/* Math Symbols Group */}
-                  <div className="flex items-center gap-1 shrink-0">
-                    <span className="text-[11px] font-black text-slate-700 shrink-0 ml-1 flex items-center gap-1">
-                      <span className="text-violet-600 font-bold">∑</span>
-                      <span>إدراج رموز رياضية:</span>
-                    </span>
-                    {['√', '∫', 'lim', 'α', 'β', 'π', 'θ', 'Δ', '≠', '≤', '≥', '±', 'x²', 'x/y', '∞'].map((sym, sIdx) => (
-                      <button
-                        key={sIdx}
-                        type="button"
-                        onClick={() => insertSymbolToSubBlock(sym)}
-                        className="px-2 py-1 bg-white hover:bg-violet-50 hover:text-violet-700 text-slate-700 text-xs font-bold border border-slate-200 rounded-lg shadow-2xs transition-all cursor-pointer shrink-0 font-mono"
-                        title={`إدراج رمز ${sym}`}
-                      >
-                        {sym}
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* Visual Divider */}
-                  <div className="h-5 w-px bg-slate-300 mx-1 hidden sm:block shrink-0" />
-
                   {/* Numbering & Steps Toolbar (1 - 2 - 3 ... إلخ) */}
-                  <div className="flex items-center gap-1 shrink-0 bg-indigo-50/70 px-2 py-1 rounded-xl border border-indigo-200/80">
-                    <span className="text-[11px] font-black text-indigo-900 shrink-0 ml-0.5 flex items-center gap-1">
+                  <div className="flex items-center gap-1 shrink-0 bg-indigo-50/70 px-2 py-0.5 rounded-lg border border-indigo-200/80">
+                    <span className="text-[10px] font-black text-indigo-900 shrink-0 ml-0.5 flex items-center gap-1">
                       <span>🔢</span>
                       <span>ترقيم وخطوات:</span>
                     </span>
-                    <div className="flex items-center gap-1 overflow-x-auto">
+                    <div className="flex items-center gap-0.5 overflow-x-auto">
                       {NUMBERING_ICONS.map((numSym, nIdx) => (
                         <button
                           key={nIdx}
                           type="button"
                           onClick={() => insertSymbolToSubBlock(numSym + ' ')}
                           title={`إدراج ترقيم ${numSym}`}
-                          className="h-7 px-1.5 min-w-[28px] flex items-center justify-center bg-white hover:bg-indigo-100 hover:border-indigo-300 border border-slate-200 rounded-lg shadow-2xs text-xs sm:text-sm font-bold transition-all cursor-pointer shrink-0 hover:scale-110 active:scale-95 font-sans"
+                          className="h-6 px-1 min-w-[24px] flex items-center justify-center bg-white hover:bg-indigo-100 hover:border-indigo-300 border border-slate-200 rounded-md shadow-2xs text-xs font-bold transition-all cursor-pointer shrink-0 hover:scale-110 active:scale-95 font-sans"
                         >
                           {numSym}
                         </button>
@@ -8246,11 +8251,11 @@ export const LessonSummariesDashboard: React.FC = () => {
                   </div>
 
                   {/* Visual Divider */}
-                  <div className="h-5 w-px bg-slate-300 mx-1 hidden sm:block shrink-0" />
+                  <div className="h-4 w-px bg-slate-300 mx-0.5 hidden sm:block shrink-0" />
 
-                  {/* Paragraph Symbols & Icons Dropdown and Quick Access (Requested by User) */}
-                  <div className="flex items-center gap-1.5 shrink-0 bg-violet-50/70 px-2 py-1 rounded-xl border border-violet-200/80">
-                    <span className="text-[11px] font-black text-violet-900 shrink-0 ml-0.5 flex items-center gap-1">
+                  {/* Paragraph Symbols & Icons Dropdown and Quick Access */}
+                  <div className="flex items-center gap-1 shrink-0 bg-violet-50/70 px-2 py-0.5 rounded-lg border border-violet-200/80">
+                    <span className="text-[10px] font-black text-violet-900 shrink-0 ml-0.5 flex items-center gap-1">
                       <span>🏷️</span>
                       <span>رموز وأيقونات الفقرات:</span>
                     </span>
@@ -8264,7 +8269,7 @@ export const LessonSummariesDashboard: React.FC = () => {
                         }
                       }}
                       defaultValue=""
-                      className="text-xs bg-white text-slate-800 border border-violet-200 rounded-lg px-2 py-1 font-bold outline-none hover:border-violet-400 focus:ring-2 focus:ring-violet-400/30 cursor-pointer shadow-2xs shrink-0"
+                      className="text-xs bg-white text-slate-800 border border-violet-200 rounded-md px-1.5 py-0.5 font-bold outline-none hover:border-violet-400 focus:ring-1 focus:ring-violet-400/30 cursor-pointer shadow-2xs shrink-0 h-6"
                       title="اختر رمز أو أيقونة للفقرة لإدراجها مباشرة في موضع المؤشر"
                     >
                       <option value="" disabled>📋 قائمة أيقونات الفقرات...</option>
@@ -8276,97 +8281,29 @@ export const LessonSummariesDashboard: React.FC = () => {
                     </select>
 
                     {/* Quick 1-Click Buttons */}
-                    <div className="flex items-center gap-1 overflow-x-auto">
+                    <div className="flex items-center gap-0.5 overflow-x-auto">
                       {QUICK_PARAGRAPH_ICONS.map((icon, iIdx) => (
                         <button
                           key={iIdx}
                           type="button"
                           onClick={() => insertSymbolToSubBlock(icon + ' ')}
                           title={`إدراج أيقونة ${icon}`}
-                          className="w-7 h-7 flex items-center justify-center bg-white hover:bg-violet-100 hover:border-violet-300 border border-slate-200 rounded-lg shadow-2xs text-xs sm:text-sm transition-all cursor-pointer shrink-0 hover:scale-110 active:scale-95"
+                          className="w-6 h-6 flex items-center justify-center bg-white hover:bg-violet-100 hover:border-violet-300 border border-slate-200 rounded-md shadow-2xs text-xs transition-all cursor-pointer shrink-0 hover:scale-110 active:scale-95"
                         >
                           {icon}
                         </button>
                       ))}
                     </div>
                   </div>
-
-                  {/* Visual Divider */}
-                  <div className="h-5 w-px bg-slate-300 mx-1 hidden sm:block shrink-0" />
-
-                  {/* Formatting & Headings Tags (الوسم **عبارة** والوسوم الأحمر والأزرق) */}
-                  <div className="flex items-center gap-1.5 shrink-0 bg-slate-100/90 px-2 py-1 rounded-xl border border-slate-300/80">
-                    <span className="text-[11px] font-black text-slate-800 shrink-0 ml-0.5 flex items-center gap-1">
-                      <span>🎨</span>
-                      <span>وسوم التنسيق:</span>
-                    </span>
-
-                    {/* Button 1: Soft Violet Highlight **عبارة** */}
-                    <button
-                      type="button"
-                      onClick={() => wrapOrInsertTagInSubBlock('**', '**', 'عبارة هامة')}
-                      className="h-7 px-2 flex items-center gap-1 bg-[#ede9fe] hover:bg-[#ddd6fe] text-[#4c1d95] border border-violet-300/80 rounded-lg shadow-2xs text-xs font-black transition-all cursor-pointer shrink-0 hover:scale-105 active:scale-95"
-                      title="الوسم **عبارة**: تظليل كلمات وعبارات هامة ومفتاحية بلون بنفسجي ناعم فوسفوري (كما يظلل الطالب أثناء الدراسة - ولا يجب أن تستخدم لعناوين الفقرات)"
-                    >
-                      <span className="text-xs">🖍️</span>
-                      <span>**تظليل عبارة**</span>
-                    </button>
-
-                    {/* Button 2: Red Main Title <main-title> */}
-                    <button
-                      type="button"
-                      onClick={() => wrapOrInsertTagInSubBlock('<main-title>', '</main-title>', 'العنوان الرئيسي')}
-                      className="h-7 px-2 flex items-center gap-1.5 bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 rounded-lg shadow-2xs text-xs font-black transition-all cursor-pointer shrink-0 hover:scale-105 active:scale-95"
-                      title="وسم أحمر للعناوين الرئيسية الكبرى: <main-title>العنوان الرئيسي</main-title>"
-                    >
-                      <span className="w-2.5 h-2.5 rounded-full bg-red-600 shrink-0 shadow-2xs"></span>
-                      <span>عنوان رئيسي (أحمر)</span>
-                    </button>
-
-                    {/* Button 3: Blue Subtitle <sub-title> */}
-                    <button
-                      type="button"
-                      onClick={() => wrapOrInsertTagInSubBlock('<sub-title>', '</sub-title>', 'العنوان الفرعي')}
-                      className="h-7 px-2 flex items-center gap-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-300 rounded-lg shadow-2xs text-xs font-black transition-all cursor-pointer shrink-0 hover:scale-105 active:scale-95"
-                      title="وسم أزرق للعناوين الفرعية والخطوات والتفريعات: <sub-title>العنوان الفرعي</sub-title>"
-                    >
-                      <span className="w-2.5 h-2.5 rounded-full bg-blue-600 shrink-0 shadow-2xs"></span>
-                      <span>عنوان فرعي (أزرق)</span>
-                    </button>
-
-                    {/* Button 4: Formula / Law Red Box ***قانون*** */}
-                    <button
-                      type="button"
-                      onClick={() => wrapOrInsertTagInSubBlock('***دستور: $', '$***', 'قانون أو مبرهنة')}
-                      className="h-7 px-2 flex items-center gap-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-lg shadow-2xs text-xs font-bold transition-all cursor-pointer shrink-0 hover:scale-105 active:scale-95"
-                      title="قانون عام أو دستور رياضي ضمن إطار أحمر: ***دستور: $...$***"
-                    >
-                      <span>📐</span>
-                      <span>قانون / دستور</span>
-                    </button>
-                  </div>
                 </div>
 
-                {/* Quick Action Buttons (Save without exiting + AI Rephrase) */}
+                {/* AI Rephrase Button */}
                 <div className="flex items-center gap-2 shrink-0 mr-auto">
-                  {/* Toolbar Save Button */}
-                  <button
-                    type="button"
-                    onClick={() => handleSaveSubBlockEdit(false)}
-                    disabled={isSavingSubBlock}
-                    className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white text-xs font-black rounded-lg shadow-sm transition-all flex items-center gap-1.5 cursor-pointer shrink-0 disabled:opacity-50"
-                    title="حفظ التعديلات في قاعدة البيانات دون الخروج من النافذة"
-                  >
-                    {isSavingSubBlock ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-                    <span>{isSavingSubBlock ? 'جاري الحفظ...' : 'حفظ'}</span>
-                  </button>
-
-                  {/* AI Rephrase Button */}
                   <button
                     type="button"
                     onClick={handleSubBlockAiRephrase}
                     disabled={isSubBlockAiRephrasing}
-                    className="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-black rounded-lg shadow-sm transition-all flex items-center gap-1.5 cursor-pointer shrink-0 disabled:opacity-50"
+                    className="px-3 py-1 bg-violet-600 hover:bg-violet-700 text-white text-xs font-black rounded-lg shadow-sm transition-all flex items-center gap-1.5 cursor-pointer shrink-0 disabled:opacity-50"
                   >
                     <Sparkles size={13} className={isSubBlockAiRephrasing ? 'animate-spin' : ''} />
                     {isSubBlockAiRephrasing ? 'جاري التحسين...' : 'صياغة ذكية بالـ AI'}
@@ -8380,7 +8317,7 @@ export const LessonSummariesDashboard: React.FC = () => {
                 <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 px-3.5 py-1.5 rounded-xl text-xs font-black flex items-center justify-between shadow-2xs animate-fadeIn">
                   <div className="flex items-center gap-2">
                     <CheckCircle size={15} className="text-emerald-700 shrink-0" />
-                    <span>{subBlockSaveNotice} — تم تخزين كافة التغييرات بأمان، ويمكنك متابعة التعديل مباشرة دون مغادرة النافذة.</span>
+                    <span>{subBlockSaveNotice} — تم تخزين كافة التغييرات بأمان.</span>
                   </div>
                   <button
                     type="button"
@@ -8397,29 +8334,12 @@ export const LessonSummariesDashboard: React.FC = () => {
             <div className="flex-1 overflow-y-auto p-5 grid grid-cols-1 md:grid-cols-2 gap-5 min-h-0 bg-slate-100/50">
               
               {/* RIGHT COLUMN: Text Area Editor (التحرير على اليمين) */}
-              <div className="flex flex-col gap-4 bg-white rounded-xl border border-slate-200 p-4 shadow-sm min-h-[300px]">
+              <div className="flex flex-col gap-4 bg-white rounded-xl border border-slate-200 p-4 shadow-sm min-h-[350px]">
                 <div className="flex flex-col flex-1">
                   <label className="text-xs font-black text-slate-700 mb-1.5 flex items-center justify-between">
                     <span>📝 {editingSubBlockModal.secondaryFieldKey ? (editingSubBlockModal.fieldName || 'نص التمرين (اليمين)') : 'التحرير اليدوي لكتابة وصياغة النص والمعادلات (اليمين)'}:</span>
                     <span className="text-[10px] text-violet-600 font-bold">يدعم معادلات LaTeX وصيغ الرياضيات والأيقونات</span>
                   </label>
-                  
-                  {/* Tag Usage Guidance Strip */}
-                  <div className="flex flex-wrap items-center gap-2 mb-2 p-1.5 bg-slate-50 rounded-lg border border-slate-200/90 text-[11px]">
-                    <span className="font-bold text-slate-500 shrink-0">قواعد الوسوم:</span>
-                    <span className="inline-flex items-center gap-1 bg-[#ede9fe] text-[#4c1d95] px-2 py-0.5 rounded font-black border border-violet-300/80 text-[10px]" title="تظليل فوسفوري بنفسجي ناعم">
-                      <span>🖍️ **عبارة**</span>
-                      <span className="font-normal text-violet-800">(تظليل كلمات مفتاحية أثناء الدراسة — وليس لعناوين الفقرات)</span>
-                    </span>
-                    <span className="inline-flex items-center gap-1 bg-red-50 text-red-700 px-2 py-0.5 rounded font-bold border border-red-200 text-[10px]">
-                      <span className="w-1.5 h-1.5 rounded-full bg-red-600"></span>
-                      <span>&lt;main-title&gt; (عنوان رئيسي أحمر)</span>
-                    </span>
-                    <span className="inline-flex items-center gap-1 bg-blue-50 text-blue-700 px-2 py-0.5 rounded font-bold border border-blue-200 text-[10px]">
-                      <span className="w-1.5 h-1.5 rounded-full bg-blue-600"></span>
-                      <span>&lt;sub-title&gt; (عنوان فرعي أزرق)</span>
-                    </span>
-                  </div>
 
                   <textarea
                     ref={subBlockPrimaryTextareaRef}
@@ -8509,28 +8429,16 @@ export const LessonSummariesDashboard: React.FC = () => {
               </div>
 
               <div className="flex items-center gap-2.5">
-                {/* زر "حفظ" لحفظ التعديلات بدون الخروج من النافذة */}
-                <button
-                  type="button"
-                  onClick={() => handleSaveSubBlockEdit(false)}
-                  disabled={isSavingSubBlock}
-                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-black rounded-xl text-xs sm:text-sm shadow-md shadow-emerald-600/20 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                  title="حفظ التعديلات في قاعدة البيانات بدون الخروج من النافذة"
-                >
-                  {isSavingSubBlock ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
-                  <span>{isSavingSubBlock ? 'جاري الحفظ...' : 'حفظ 💾'}</span>
-                </button>
-
-                {/* زر حفظ واعتماد وإغلاق */}
+                {/* زر واحد فقط لحفظ التعديلات واعتمادها */}
                 <button
                   type="button"
                   onClick={() => handleSaveSubBlockEdit(true)}
                   disabled={isSavingSubBlock}
-                  className="px-6 py-2.5 bg-violet-600 hover:bg-violet-700 active:bg-violet-800 text-white font-black rounded-xl text-xs sm:text-sm shadow-lg shadow-violet-600/20 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                  title="حفظ التعديلات واعتمادها وإغلاق النافذة"
+                  className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-black rounded-xl text-xs sm:text-sm shadow-md shadow-emerald-600/20 transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                  title="حفظ التعديلات واعتمادها في قاعدة البيانات"
                 >
-                  <Check size={15} />
-                  <span>حفظ وإغلاق ✓</span>
+                  {isSavingSubBlock ? <Loader2 size={15} className="animate-spin" /> : <Check size={16} />}
+                  <span>{isSavingSubBlock ? 'جاري الحفظ...' : 'حفظ التعديلات'}</span>
                 </button>
               </div>
             </div>
