@@ -26,7 +26,8 @@ import {
   FileText,
   Target,
   Zap,
-  Printer
+  Printer,
+  Sliders
 } from 'lucide-react';
 import { 
   db, 
@@ -388,6 +389,84 @@ export const UnitQuizSection: React.FC<UnitQuizSectionProps> = ({
     }
   };
 
+  // Convert numeric difficulty values (1, 2, 3, 4, 5) to standardized text ('easy', 'medium', 'hard')
+  const handleConvertDifficulty = async () => {
+    const targetQuiz = editableQuiz || unitQuiz;
+    if (!targetQuiz || !targetQuiz.questions || targetQuiz.questions.length === 0) {
+      alert('لا توجد أسئلة في اختبار الوحدة لتحويل صعوبتها.');
+      return;
+    }
+
+    let convertedCount = 0;
+    const updatedQuestions = targetQuiz.questions.map((q: any) => {
+      const currentDiff = q.difficulty;
+      let newDiff: 'easy' | 'medium' | 'hard' | undefined = undefined;
+
+      // Check numeric or string representation of numbers 1 to 5
+      const num = typeof currentDiff === 'number'
+        ? currentDiff
+        : typeof currentDiff === 'string' && /^[1-5]$/.test(currentDiff.trim())
+          ? parseInt(currentDiff.trim(), 10)
+          : null;
+
+      if (num !== null) {
+        if (num <= 2) newDiff = 'easy';
+        else if (num === 3) newDiff = 'medium';
+        else if (num >= 4) newDiff = 'hard';
+      } else if (!currentDiff && typeof q.difficultyLevel === 'number' && q.difficultyLevel >= 1 && q.difficultyLevel <= 5) {
+        if (q.difficultyLevel <= 2) newDiff = 'easy';
+        else if (q.difficultyLevel === 3) newDiff = 'medium';
+        else if (q.difficultyLevel >= 4) newDiff = 'hard';
+      }
+
+      if (newDiff && newDiff !== currentDiff) {
+        convertedCount++;
+        return {
+          ...q,
+          difficulty: newDiff,
+          difficultyLevel: q.difficultyLevel || (num !== null ? num : (newDiff === 'easy' ? 2 : newDiff === 'medium' ? 3 : 4))
+        };
+      }
+
+      return q;
+    });
+
+    if (convertedCount === 0) {
+      showToast('كافة الأسئلة تحوي بالفعل قيماً نصية معيارية للصعوبة (easy / medium / hard). ✨');
+      return;
+    }
+
+    try {
+      const updatedQuiz: UnitQuiz = {
+        ...targetQuiz,
+        questions: updatedQuestions,
+        updatedAt: Date.now()
+      };
+
+      if (unitQuiz?.id) {
+        updatedQuiz.id = unitQuiz.id;
+        await db.unitQuizzes.put(updatedQuiz);
+      } else if (docId) {
+        const existing = await db.unitQuizzes.where('docId').equals(docId).first();
+        if (existing?.id) {
+          updatedQuiz.id = existing.id;
+          await db.unitQuizzes.put(updatedQuiz);
+        }
+      }
+
+      setUnitQuiz(updatedQuiz);
+      if (editableQuiz) {
+        setEditableQuiz(updatedQuiz);
+      }
+
+      showToast(`تم تحويل الصعوبة بنجاح لـ ${convertedCount} سؤال! (1، 2 ➔ easy | 3 ➔ medium | 4، 5 ➔ hard) ⚙️`);
+      if (onUpdateDocument) onUpdateDocument();
+    } catch (err: any) {
+      console.error('Error converting difficulty:', err);
+      alert('حدث خطأ أثناء حفظ تحويل الصعوبة في قاعدة البيانات.');
+    }
+  };
+
   const currentQ = unitQuiz?.questions[currentQuestionIndex];
 
   return (
@@ -520,6 +599,16 @@ export const UnitQuizSection: React.FC<UnitQuizSectionProps> = ({
                   >
                     <Edit3 size={14} />
                     <span>تعديل</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleConvertDifficulty}
+                    className="flex items-center gap-1.5 px-3 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 rounded-xl border border-amber-300 shadow-sm transition-all cursor-pointer font-bold text-xs"
+                    title="تحويل الصعوبة من أعداد (1-5) إلى نصوص: 1، 2 ➔ easy | 3 ➔ medium | 4، 5 ➔ hard"
+                  >
+                    <Sliders size={14} className="text-amber-600" />
+                    <span>تحويل الصعوبة</span>
                   </button>
 
                   <button
@@ -989,6 +1078,15 @@ export const UnitQuizSection: React.FC<UnitQuizSectionProps> = ({
               <div className="flex items-center gap-2">
                 <button
                   type="button"
+                  onClick={handleConvertDifficulty}
+                  className="px-3.5 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-400/40 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs active:scale-95"
+                  title="تحويل الصعوبة من أعداد (1-5) إلى نصوص (1، 2 ➔ easy | 3 ➔ medium | 4، 5 ➔ hard)"
+                >
+                  <Sliders size={14} className="text-amber-300" />
+                  <span>تحويل الصعوبة ⚙️</span>
+                </button>
+                <button
+                  type="button"
                   onClick={handleCleanAllLatex}
                   className="px-3.5 py-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 border border-emerald-400/40 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs active:scale-95"
                   title="تطهير وتنظيف كافة الشرطات المائلة المزدوجة \\ في كل الأسئلة والخيارات والشروحات لتظهر الرموز الرياضية بشكل سليم فوراً"
@@ -1026,7 +1124,7 @@ export const UnitQuizSection: React.FC<UnitQuizSectionProps> = ({
                 {editableQuiz.questions.map((q, qIdx) => (
                   <div key={q.id || qIdx} className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-200 shadow-xs space-y-4">
                     <div className="flex items-center justify-between border-b border-gray-100 pb-3 flex-wrap gap-2">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span className="w-6 h-6 rounded-full bg-violet-100 text-violet-700 font-black text-xs flex items-center justify-center border border-violet-200">
                           {qIdx + 1}
                         </span>
@@ -1043,9 +1141,10 @@ export const UnitQuizSection: React.FC<UnitQuizSectionProps> = ({
                               const res = await classifySingleQuestion(q.questionText, opts, correctOpt, concepts);
                               const newQs = [...editableQuiz.questions];
                               newQs[qIdx].difficultyLevel = res.level;
+                              newQs[qIdx].difficulty = res.level <= 2 ? 'easy' : res.level === 3 ? 'medium' : 'hard';
                               newQs[qIdx].topic = res.concept;
                               setEditableQuiz({ ...editableQuiz, questions: newQs });
-                              showToast(`تم تصنيف السؤال: المستوى ${res.level} • المفهوم: ${res.concept}`);
+                              showToast(`تم تصنيف السؤال: المستوى ${res.level} (${newQs[qIdx].difficulty}) • المفهوم: ${res.concept}`);
                             } catch (e: any) {
                               alert('فشل التصنيف الفردي: ' + e.message);
                             }
@@ -1056,8 +1155,34 @@ export const UnitQuizSection: React.FC<UnitQuizSectionProps> = ({
                           <Sparkles size={12} />
                           <span>تصنيف AI</span>
                         </button>
+
+                        {/* Difficulty Selector */}
+                        <div className="flex items-center gap-1 bg-slate-100 px-2 py-1 rounded-xl border border-slate-200">
+                          <span className="text-[10px] font-black text-slate-500">الصعوبة:</span>
+                          <select
+                            value={q.difficulty || (q.difficultyLevel ? (q.difficultyLevel <= 2 ? 'easy' : q.difficultyLevel === 3 ? 'medium' : 'hard') : 'medium')}
+                            onChange={(e) => {
+                              const newQs = [...editableQuiz.questions];
+                              const selected = e.target.value as 'easy' | 'medium' | 'hard';
+                              newQs[qIdx].difficulty = selected;
+                              newQs[qIdx].difficultyLevel = selected === 'easy' ? 2 : selected === 'medium' ? 3 : 4;
+                              setEditableQuiz({ ...editableQuiz, questions: newQs });
+                            }}
+                            className={`px-2 py-0.5 rounded-lg text-[10px] font-black border outline-none cursor-pointer transition-all ${
+                              q.difficulty === 'easy' ? 'bg-emerald-100 text-emerald-900 border-emerald-300' :
+                              q.difficulty === 'medium' ? 'bg-amber-100 text-amber-900 border-amber-300' :
+                              q.difficulty === 'hard' ? 'bg-rose-100 text-rose-900 border-rose-300' :
+                              'bg-indigo-100 text-indigo-900 border-indigo-300'
+                            }`}
+                          >
+                            <option value="easy">سهل (easy)</option>
+                            <option value="medium">متوسط (medium)</option>
+                            <option value="hard">صعب (hard)</option>
+                          </select>
+                        </div>
+
                         {q.difficultyLevel && (
-                          <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-lg text-[10px] font-bold">
+                          <span className="px-2 py-0.5 bg-slate-100 text-slate-700 rounded-lg text-[10px] font-bold border border-slate-200">
                             مستوى {q.difficultyLevel} {q.topic ? `• ${q.topic}` : ''}
                           </span>
                         )}

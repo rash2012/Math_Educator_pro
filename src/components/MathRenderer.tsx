@@ -6,8 +6,28 @@ import rehypeKatex from 'rehype-katex';
 import rehypeRaw from 'rehype-raw';
 
 interface MathRendererProps {
-  content: string;
+  content: unknown;
   className?: string;
+}
+
+function coerceMathContent(content: unknown): string {
+  if (content === null || content === undefined) return '';
+  if (typeof content === 'string') return content;
+  if (typeof content === 'number' || typeof content === 'boolean') return String(content);
+  if (Array.isArray(content)) {
+    return content.map(item => coerceMathContent(item)).filter(Boolean).join('\n');
+  }
+  if (typeof content === 'object') {
+    const obj = content as Record<string, unknown>;
+    const candidate = obj.text ?? obj.content ?? obj.statement ?? obj.question ?? obj.solution ?? obj.label ?? obj.value ?? obj.title;
+    if (candidate !== undefined) return coerceMathContent(candidate);
+    try {
+      return JSON.stringify(content);
+    } catch {
+      return String(content);
+    }
+  }
+  return String(content);
 }
 
 /**
@@ -44,11 +64,12 @@ export function sanitizeLatexDoubleBackslashes(content: string): string {
  * CRITICAL: NEVER wrap commands or environments that are ALREADY inside existing $ ... $ blocks!
  */
 export function autoWrapUnwrappedLatex(text: string): string {
-  if (!text) return '';
+  const safeText = coerceMathContent(text);
+  if (!safeText) return '';
 
   // Match existing math blocks: $$...$$ or $...$
   const mathBlockRegex = /(\$\$[\s\S]*?\$\$|\$[^$\n]+?\$)/g;
-  const parts = text.split(mathBlockRegex);
+  const parts = safeText.split(mathBlockRegex);
 
   return parts.map((part) => {
     // If already inside $...$ or $$...$$, preserve completely as is!
@@ -75,10 +96,11 @@ export function autoWrapUnwrappedLatex(text: string): string {
 }
 
 export function repairArabicMathText(content: string): string {
-  if (!content) return content;
+  const safeContent = coerceMathContent(content);
+  if (!safeContent) return '';
 
   // 1. Pre-clean consecutive double backslashes safely without affecting table/array row breaks
-  let sanitized = sanitizeLatexDoubleBackslashes(content);
+  let sanitized = sanitizeLatexDoubleBackslashes(safeContent);
 
   // 2. Pre-normalize all mathematical block/inline delimiters to simple single dollars
   // to avoid unmatched dangling dollars (which scramble/swallow Arabic text)
@@ -271,11 +293,12 @@ function processEmbeddedSvg(svg: string): { html: string; width: string | null; 
 }
 
 export const MathRenderer: React.FC<MathRendererProps> = memo(({ content, className }) => {
-  if (!content) return null;
+  const safeContent = coerceMathContent(content);
+  if (!safeContent) return null;
 
   // تقسيم المحتوى لاستخراج وسوم الـ SVG والاحتفاظ بها تماماً كما هي دون العبث بها
   const svgRegex = /(<\s*svg[\s\S]*?<\/svg\s*>)/gi;
-  const parts = content.split(svgRegex);
+  const parts = safeContent.split(svgRegex);
 
   return (
     <div className={`math-markdown-content flow-root ${className || ''} print:overflow-visible`} dir="rtl">

@@ -336,3 +336,52 @@ export async function deleteExerciseFamilyAtomic(familyId: number | string, docI
     }
   });
 }
+
+/**
+ * 🧹 Removes all prior saved families for a document (except keepIds) and unlinks orphaned family tags before saving a fresh classification.
+ */
+export async function clearUnitExerciseFamiliesExceptAtomic(
+  docId: number,
+  keepIds: Array<number | string> = []
+): Promise<void> {
+  const keepSet = new Set(keepIds.map(id => String(id)));
+
+  await db.transaction('rw', [db.exerciseFamilies, db.exerciseStations, db.lessonSections], async () => {
+    const existingFamilies = await db.exerciseFamilies.where('docId').equals(docId).toArray();
+    const removedIds = new Set<string>();
+
+    for (const fam of existingFamilies) {
+      if (fam.id !== undefined && !keepSet.has(String(fam.id))) {
+        removedIds.add(String(fam.id));
+        await db.exerciseFamilies.delete(fam.id);
+      }
+    }
+
+    if (removedIds.size === 0) return;
+
+    const sections = await db.lessonSections.where('docId').equals(docId).toArray();
+    for (const section of sections) {
+      if (!section.practiceExercises) continue;
+      let modified = false;
+      const updated = section.practiceExercises.map(pe => {
+        if (pe.family_id !== undefined && removedIds.has(String(pe.family_id))) {
+          modified = true;
+          return {
+            ...pe,
+            family_id: undefined,
+            is_lead_exercise: undefined,
+            primary_concept: undefined,
+            secondary_concepts: undefined,
+            patternType: undefined
+          };
+        }
+        return pe;
+      });
+
+      if (modified && section.id) {
+        await db.lessonSections.update(section.id, { practiceExercises: updated });
+      }
+    }
+  });
+}
+

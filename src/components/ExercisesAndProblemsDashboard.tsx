@@ -24,7 +24,8 @@ import {
   extractUnitExercisesFromReference,
   separateStrategyAndSolution,
   regenerateExerciseStrategyAI,
-  cleanStrategyMetaHeaders
+  cleanStrategyMetaHeaders,
+  extractExerciseSolutionFromPdfAI
 } from '../services/gemini';
 
 // Modular Subcomponents
@@ -39,6 +40,7 @@ import { ExerciseCard } from './exercises/ExerciseCard';
 import { sanitizeLatexDoubleBackslashes } from './MathRenderer';
 import { ExerciseEditModal } from './exercises/ExerciseEditModal';
 import { ExerciseVerifyModal } from './exercises/ExerciseVerifyModal';
+import { AddSolutionFromPdfModal } from './exercises/AddSolutionFromPdfModal';
 import { ExercisePrintSettingsPanel } from './exercises/ExercisePrintSettingsModal';
 import { ExerciseCoverPage } from './exercises/ExerciseCoverPage';
 import { ExerciseFamiliesModal } from './exercises/ExerciseFamiliesModal';
@@ -110,6 +112,11 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
   } | null>(null);
 
   const [verifyingExModal, setVerifyingExModal] = useState<{
+    sectionId: number;
+    exercise: PracticeExercise;
+  } | null>(null);
+
+  const [pdfSolutionExModal, setPdfSolutionExModal] = useState<{
     sectionId: number;
     exercise: PracticeExercise;
   } | null>(null);
@@ -532,6 +539,55 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
     } finally {
       setAiLoading(null);
     }
+  };
+
+  const handleAddSolutionFromPdf = async (
+    sectionId: number,
+    ex: PracticeExercise,
+    params: { pdfBase64: string; fileName: string; userInstructions: string }
+  ): Promise<{
+    isMatch: boolean;
+    mismatchReason?: string;
+    detectedExerciseSummary?: string;
+  }> => {
+    const res = await extractExerciseSolutionFromPdfAI({
+      exerciseTitle: ex.title || 'تمرين',
+      exerciseQuestionText: ex.questionText || '',
+      pdfBase64: params.pdfBase64,
+      userInstructions: params.userInstructions,
+      sectionTitle: activeDocument?.title || 'تمرينات ومسائل الوحدة'
+    });
+
+    if (!res.isMatch) {
+      return {
+        isMatch: false,
+        mismatchReason:
+          res.mismatchReason ||
+          'الحل المرفق في ملف PDF لا يخص التمرين النشط.',
+        detectedExerciseSummary: res.detectedExerciseSummary
+      };
+    }
+
+    const { cleanSolution, cleanStrategy } = separateStrategyAndSolution(
+      res.solutionText || '',
+      res.strategyText || ex.strategyText || ''
+    );
+
+    const updated: PracticeExercise = {
+      ...ex,
+      solutionText: cleanSolution,
+      strategyText: cleanStrategy || ex.strategyText
+    };
+
+    await handleSaveExercise(sectionId, updated, false);
+    setShowSolutions(true);
+    setPdfSolutionExModal(null);
+    showAlert(
+      'تمت إضافة الحل بنجاح ✅',
+      `تم التحقق من مطابقة ملف "${params.fileName}" للتمرين النشط واستخراج الحل وحفظه بنجاح.`
+    );
+
+    return { isMatch: true };
   };
 
   const handleAIRegenerateStrategy = async (
@@ -2068,6 +2124,7 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
                                     onEdit={() => setEditingExModal({ sectionId: sec.id!, exercise: { ...ex } })}
                                     onVerify={() => setVerifyingExModal({ sectionId: sec.id!, exercise: { ...ex } })}
                                     onGenerateSolution={() => handleAIGenerateSolution(sec.id!, ex)}
+                                    onAddSolutionFromPdf={() => setPdfSolutionExModal({ sectionId: sec.id!, exercise: { ...ex } })}
                                     onRegenerateStrategy={() => handleAIRegenerateStrategy(sec.id!, ex)}
                                     onShortenSolution={() => handleAIShortenSolution(sec.id!, ex)}
                                     onGenerateSvg={() => handleAIGenerateSvg(sec.id!, ex)}
@@ -2272,6 +2329,21 @@ export const ExercisesAndProblemsDashboard: React.FC<{ onBack?: () => void; init
           exercise={verifyingExModal.exercise}
           onClose={() => setVerifyingExModal(null)}
           onApply={(updated) => handleSaveExercise(verifyingExModal.sectionId, updated)}
+        />
+      )}
+
+      {/* ADD SOLUTION FROM PDF MODAL */}
+      {pdfSolutionExModal && (
+        <AddSolutionFromPdfModal
+          exercise={pdfSolutionExModal.exercise}
+          onClose={() => setPdfSolutionExModal(null)}
+          onSubmitPdf={(params) =>
+            handleAddSolutionFromPdf(
+              pdfSolutionExModal.sectionId,
+              pdfSolutionExModal.exercise,
+              params
+            )
+          }
         />
       )}
 

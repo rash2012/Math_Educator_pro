@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { db, type Test, type Document } from '../db';
-import { ArrowRight, Loader2, Printer, Edit, Edit3, Save, RefreshCw, Sparkles, Image as ImageIcon, Lightbulb, Settings, Plus, X, Trash, Lock, LockOpen, CheckCircle2, ClipboardCheck, BrainCircuit, Scale, BarChart3, TrendingUp, Gauge, Clock, ShieldAlert, FileSpreadsheet, BookOpen, CheckCircle, AlertTriangle, Info, ListOrdered, Cloud } from 'lucide-react';
+import { ArrowRight, ArrowUp, ArrowDown, RotateCcw, SlidersHorizontal, Loader2, Printer, Edit, Edit3, Save, RefreshCw, Sparkles, Image as ImageIcon, Lightbulb, Settings, Plus, X, Trash, Lock, LockOpen, CheckCircle2, ClipboardCheck, BrainCircuit, Scale, BarChart3, TrendingUp, Gauge, Clock, ShieldAlert, FileSpreadsheet, BookOpen, CheckCircle, AlertTriangle, Info, ListOrdered, Cloud } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { generateAlternativeQuestion, generateSvgForTestQuestion, generateSolutionForQuestion, reviewTest, applyFixesToTest, reviewSingleQuestion } from '../services/gemini';
 import Markdown from 'react-markdown';
@@ -24,6 +24,60 @@ interface TestViewProps {
   autoTriggerPrint?: boolean;
 }
 
+interface TestHeaderConfig {
+  showTitle?: boolean;
+  showAcademicRow?: boolean;
+  showGrade?: boolean;
+  showSubject?: boolean;
+  showPart?: boolean;
+  showUnit?: boolean;
+  showTopic?: boolean;
+  showMetaRow?: boolean;
+  showSeries?: boolean;
+  showTeacher?: boolean;
+  showTime?: boolean;
+  showPrintSubBar?: boolean;
+  printSubBarText?: string;
+  showCustomNote?: boolean;
+  customNote?: string;
+  showEndLabel?: boolean;
+  endLabel?: string;
+  showFooter?: boolean;
+  footerText?: string;
+}
+
+interface TestPrintSettings {
+  headerFontSize: number;
+  footerFontSize: number;
+  watermarkFontSize: number;
+  mainHeadingFontSize: number;
+  subHeadingFontSize: number;
+  bodyFontSize: number;
+  marginTop: number;
+  marginBottom: number;
+  marginRight: number;
+  marginLeft: number;
+  mcqQuestionGap: number;
+}
+
+const DEFAULT_PRINT_SETTINGS: TestPrintSettings = {
+  headerFontSize: 11,
+  footerFontSize: 10,
+  watermarkFontSize: 16,
+  mainHeadingFontSize: 15,
+  subHeadingFontSize: 13,
+  bodyFontSize: 12,
+  marginTop: 12,
+  marginBottom: 15,
+  marginRight: 15,
+  marginLeft: 15,
+  mcqQuestionGap: 12,
+};
+
+const PRINT_SETTINGS_STORAGE_KEY = 'math_educator_test_print_settings_v1';
+
+const clampFontSize = (val: number) => Math.min(16, Math.max(7, Math.round(val || 12)));
+
 export const TestView: React.FC<TestViewProps> = ({ testId, onBack, autoTriggerPrint = false }) => {
   const [test, setTest] = useState<Test | undefined>(undefined);
   const [loading, setLoading] = useState(true);
@@ -31,6 +85,28 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack, autoTriggerP
   const [isEditing, setIsEditing] = useState(false);
   const [generatingForBase, setGeneratingForBase] = useState<string | null>(null);
   const [printPreview, setPrintPreview] = useState(autoTriggerPrint);
+  const [showPrintSettings, setShowPrintSettings] = useState(true);
+  const [printSettings, setPrintSettings] = useState<TestPrintSettings>(() => {
+    try {
+      const saved = localStorage.getItem(PRINT_SETTINGS_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          ...DEFAULT_PRINT_SETTINGS,
+          ...parsed,
+          headerFontSize: clampFontSize(parsed.headerFontSize ?? DEFAULT_PRINT_SETTINGS.headerFontSize),
+          footerFontSize: clampFontSize(parsed.footerFontSize ?? DEFAULT_PRINT_SETTINGS.footerFontSize),
+          watermarkFontSize: clampFontSize(parsed.watermarkFontSize ?? DEFAULT_PRINT_SETTINGS.watermarkFontSize),
+          mainHeadingFontSize: clampFontSize(parsed.mainHeadingFontSize ?? DEFAULT_PRINT_SETTINGS.mainHeadingFontSize),
+          subHeadingFontSize: clampFontSize(parsed.subHeadingFontSize ?? DEFAULT_PRINT_SETTINGS.subHeadingFontSize),
+          bodyFontSize: clampFontSize(parsed.bodyFontSize ?? DEFAULT_PRINT_SETTINGS.bodyFontSize),
+        };
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return DEFAULT_PRINT_SETTINGS;
+  });
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [expandedActions, setExpandedActions] = useState<string | null>(null);
   const [isDesignerModalOpen, setIsDesignerModalOpen] = useState(false);
@@ -56,6 +132,22 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack, autoTriggerP
     question: any;
   } | null>(null);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(PRINT_SETTINGS_STORAGE_KEY, JSON.stringify(printSettings));
+    } catch {
+      // ignore storage errors
+    }
+  }, [printSettings]);
+
+  const updatePrintSetting = <K extends keyof TestPrintSettings>(key: K, value: number) => {
+    setPrintSettings(prev => ({ ...prev, [key]: value }));
+  };
+
+  const resetPrintSettings = () => {
+    setPrintSettings(DEFAULT_PRINT_SETTINGS);
+  };
+
   const handleSaveQuestionFromModal = async (updatedQ: any) => {
     if (!test || !editingQuestionModalData) return;
     const { sectionIdx, questionIdx } = editingQuestionModalData;
@@ -69,14 +161,11 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack, autoTriggerP
     }
   };
 
-  // Auto trigger print preview if requested
+  // Auto trigger print preview & open print settings if requested
   useEffect(() => {
     if (autoTriggerPrint && test && !loading) {
       setPrintPreview(true);
-      const timer = setTimeout(() => {
-        window.print();
-      }, 300);
-      return () => clearTimeout(timer);
+      setShowPrintSettings(true);
     }
   }, [autoTriggerPrint, test, loading]);
 
@@ -270,17 +359,62 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack, autoTriggerP
 
   const data = test.testData;
 
-  const handlePrint = (immediatePrint: boolean = true) => {
-      setPrintPreview(true);
-      if (immediatePrint) {
-        setTimeout(() => {
-          window.print();
-        }, 200);
-      }
+  const rawHeaderCfg: TestHeaderConfig = data?.headerConfig || {};
+  const headerConfig: Required<TestHeaderConfig> = {
+    showTitle: rawHeaderCfg.showTitle !== false,
+    showAcademicRow: rawHeaderCfg.showAcademicRow !== false,
+    showGrade: rawHeaderCfg.showGrade !== false,
+    showSubject: rawHeaderCfg.showSubject !== false,
+    showPart: rawHeaderCfg.showPart !== false,
+    showUnit: rawHeaderCfg.showUnit !== false,
+    showTopic: rawHeaderCfg.showTopic !== false,
+    showMetaRow: rawHeaderCfg.showMetaRow !== false,
+    showSeries: rawHeaderCfg.showSeries !== false,
+    showTeacher: rawHeaderCfg.showTeacher !== false,
+    showTime: rawHeaderCfg.showTime !== false,
+    showPrintSubBar: rawHeaderCfg.showPrintSubBar !== false,
+    printSubBarText: rawHeaderCfg.printSubBarText ?? 'تم إعداد وتنسيق هذا الاختبار عبر منصة التعلّم الذكي',
+    showCustomNote: rawHeaderCfg.showCustomNote === true,
+    customNote: rawHeaderCfg.customNote ?? '',
+    showEndLabel: rawHeaderCfg.showEndLabel !== false,
+    endLabel: rawHeaderCfg.endLabel ?? 'انتهت الأسئلة',
+    showFooter: rawHeaderCfg.showFooter !== false,
+    footerText: rawHeaderCfg.footerText ?? 'تم إنشاء هذا الاختبار في منصة التعلّم الذكي - جميع الحقوق محفوظة للمدرّس حسن راشد العلي',
+  };
+
+  const updateHeaderConfig = (patch: Partial<TestHeaderConfig>) => {
+    setTest(prev => {
+      if (!prev || !prev.testData) return prev;
+      return {
+        ...prev,
+        testData: {
+          ...prev.testData,
+          headerConfig: {
+            ...(prev.testData.headerConfig || {}),
+            ...patch,
+          },
+        },
+      };
+    });
+    setHasUnsavedChanges(true);
+  };
+
+  const updateTestRootField = (patch: Partial<Pick<Test, 'title' | 'grade' | 'subject' | 'part' | 'unit' | 'topic' | 'seriesName' | 'teacherName'>>) => {
+    setTest(prev => {
+      if (!prev) return prev;
+      const nextTestData = patch.title !== undefined ? { ...prev.testData, title: patch.title } : prev.testData;
+      return { ...prev, ...patch, testData: nextTestData };
+    });
+    setHasUnsavedChanges(true);
+  };
+
+  const handleOpenPrintPreview = () => {
+    setPrintPreview(true);
+    setShowPrintSettings(true);
   };
 
   const handleNativePrint = () => {
-      window.print();
+    window.print();
   };
 
   const updateQuestionData = (sectionIdx: number, questionIdx: number, updater: (q: any) => void) => {
@@ -290,6 +424,60 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack, autoTriggerP
       if (newTestData.sections[sectionIdx]?.questions[questionIdx]) {
         updater(newTestData.sections[sectionIdx].questions[questionIdx]);
       }
+      return { ...prev, testData: newTestData };
+    });
+    setHasUnsavedChanges(true);
+  };
+
+  const handleUpdateSection = (sectionIdx: number, patch: { title?: string; sectionType?: string }) => {
+    setTest(prev => {
+      if (!prev || !prev.testData?.sections?.[sectionIdx]) return prev;
+      const newTestData = JSON.parse(JSON.stringify(prev.testData));
+      newTestData.sections[sectionIdx] = {
+        ...newTestData.sections[sectionIdx],
+        ...patch,
+      };
+      return { ...prev, testData: newTestData };
+    });
+    setHasUnsavedChanges(true);
+  };
+
+  const handleMoveSection = (sectionIdx: number, direction: -1 | 1) => {
+    setTest(prev => {
+      if (!prev || !prev.testData?.sections) return prev;
+      const targetIdx = sectionIdx + direction;
+      if (targetIdx < 0 || targetIdx >= prev.testData.sections.length) return prev;
+      const newTestData = JSON.parse(JSON.stringify(prev.testData));
+      const [moved] = newTestData.sections.splice(sectionIdx, 1);
+      newTestData.sections.splice(targetIdx, 0, moved);
+      return { ...prev, testData: newTestData };
+    });
+    setHasUnsavedChanges(true);
+  };
+
+  const handleRemoveSection = (sectionIdx: number) => {
+    setTest(prev => {
+      if (!prev || !prev.testData?.sections) return prev;
+      const newTestData = JSON.parse(JSON.stringify(prev.testData));
+      newTestData.sections.splice(sectionIdx, 1);
+      return { ...prev, testData: newTestData };
+    });
+    setHasUnsavedChanges(true);
+  };
+
+  const handleAddSection = (sectionType: 'mcq' | 'questions' | 'exercises' | 'problems', defaultTitle: string) => {
+    setTest(prev => {
+      if (!prev || !prev.testData) return prev;
+      const newTestData = JSON.parse(JSON.stringify(prev.testData));
+      if (!Array.isArray(newTestData.sections)) newTestData.sections = [];
+      const starterQuestion = sectionType === 'mcq'
+        ? { text: "سؤال جديد", options: ["خيار A", "خيار B", "خيار C", "خيار D"], correctOptionIndex: 0, solution: "الحل", points: 1 }
+        : { text: "نص السؤال أو التمرين...\n1) الطلب الأول\n2) الطلب الثاني", solution: "الحل", points: 1 };
+      newTestData.sections.push({
+        sectionType,
+        title: defaultTitle,
+        questions: [starterQuestion],
+      });
       return { ...prev, testData: newTestData };
     });
     setHasUnsavedChanges(true);
@@ -316,7 +504,19 @@ export const TestView: React.FC<TestViewProps> = ({ testId, onBack, autoTriggerP
         });
       }
 
-      await db.tests.update(testId, { testData: sanitizedTestData, title: test.title, isReviewed: test.isReviewed });
+      await db.tests.update(testId, {
+        testData: sanitizedTestData,
+        title: test.title,
+        grade: test.grade,
+        subject: test.subject,
+        part: test.part,
+        unit: test.unit,
+        topic: test.topic,
+        seriesName: test.seriesName,
+        teacherName: test.teacherName,
+        isReviewed: test.isReviewed,
+        updatedAt: Date.now(),
+      });
       setTest({ ...test, testData: sanitizedTestData });
       setHasUnsavedChanges(false);
       setIsEditing(false);
@@ -660,21 +860,24 @@ const parseQuestionContent = (q: any): ParsedQuestion => {
     const type = String(section?.sectionType || '').toLowerCase();
     const title = String(section?.title || '').trim();
 
-    if (type === 'mcq' || title.includes('اختيار') || (sIdx === 0 && !type)) {
-      if (type !== 'questions' && type !== 'exercises' && type !== 'problems') {
-        return 'mcq';
-      }
+    if (type === 'mcq') return 'mcq';
+    if (type === 'questions' || type === 'shortanswer') return 'questions';
+    if (type === 'exercises') return 'exercises';
+    if (type === 'problems') return 'problems';
+
+    if (title.includes('اختيار') || (sIdx === 0 && !type)) {
+      return 'mcq';
     }
 
-    if (type === 'problems' || title.includes('مسائل') || title.includes('المسائل') || title.includes('المسألة') || title.includes('رابعاً') || sIdx === 3) {
+    if (title.includes('مسائل') || title.includes('المسائل') || title.includes('المسألة') || title.includes('رابعاً') || sIdx === 3) {
       return 'problems';
     }
 
-    if (type === 'exercises' || title.includes('تمارين') || title.includes('التمارين') || title.includes('التمرين') || title.includes('ثالثاً') || sIdx === 2) {
+    if (title.includes('تمارين') || title.includes('التمارين') || title.includes('التمرين') || title.includes('ثالثاً') || sIdx === 2) {
       return 'exercises';
     }
 
-    if (type === 'questions' || title.includes('أسئلة') || title.includes('الأسئلة') || title.includes('السؤال') || title.includes('ثانياً') || sIdx === 1) {
+    if (title.includes('أسئلة') || title.includes('الأسئلة') || title.includes('السؤال') || title.includes('ثانياً') || sIdx === 1) {
       return 'questions';
     }
 
@@ -690,7 +893,7 @@ const parseQuestionContent = (q: any): ParsedQuestion => {
 
       if (category === 'mcq') {
           return (
-              <span className={`flex items-center justify-center w-6 h-6 rounded-full border border-black text-black shrink-0 text-sm font-bold select-none ${isEdit ? 'mt-2' : ''}`}>
+              <span className={`print-sub-heading flex items-center justify-center w-6 h-6 rounded-full border border-black text-black shrink-0 text-sm font-bold select-none ${isEdit ? 'mt-2' : ''}`}>
                   {qIdx + 1}
               </span>
           );
@@ -708,7 +911,7 @@ const parseQuestionContent = (q: any): ParsedQuestion => {
       }
 
       return (
-          <span className={`font-bold shrink-0 text-black text-base whitespace-nowrap select-none ${isEdit ? 'mt-2' : ''}`}>
+          <span className={`print-sub-heading font-bold shrink-0 text-black text-base whitespace-nowrap select-none ${isEdit ? 'mt-2' : ''}`}>
               {title}
           </span>
       );
@@ -869,9 +1072,9 @@ const parseQuestionContent = (q: any): ParsedQuestion => {
                   {showAnswers ? 'إخفاء سلالم الحل' : 'إظهار سلالم الحل'}
               </button>
               <button
-                  onClick={() => handlePrint(true)}
+                  onClick={handleOpenPrintPreview}
                   className="px-4 py-2 bg-indigo-600 text-white font-black rounded-xl hover:bg-indigo-700 transition-all flex items-center gap-2 shadow-md cursor-pointer"
-                  title="معاينة الطباعة وحفظ كـ PDF"
+                  title="فتح إعدادات الطباعة ومعاينة PDF"
               >
                   <Printer size={18} />
                   معاينة الطباعة / حفظ كـ PDF 🖨️
@@ -879,90 +1082,255 @@ const parseQuestionContent = (q: any): ParsedQuestion => {
           </div>
         </div>
       ) : (
-        <div className="w-[210mm] max-w-full flex flex-col md:flex-row gap-4 justify-between items-start md:items-center mb-6 no-print bg-white p-5 rounded-2xl shadow-md border border-gray-100" dir="rtl">
-            <div className="flex flex-col gap-1">
-                <h2 className="font-bold text-lg text-gray-800 flex items-center gap-2">
-                    <Printer className="text-indigo-600" size={20} />
-                    طباعة الاختبار وتخصيص العلامة المائية
-                </h2>
-                <span className="text-xs text-gray-500">قم بتخصيص نص العلامة المائية ونوع الخط للطباعة ثم اضغط طباعة</span>
+        <div className="w-[210mm] max-w-full flex flex-col gap-4 mb-6 no-print bg-white p-5 rounded-2xl shadow-md border border-gray-200" dir="rtl">
+            {/* Top Toolbar */}
+            <div className="flex flex-col md:flex-row gap-3 justify-between items-start md:items-center">
+              <div className="flex flex-col gap-1">
+                  <h2 className="font-bold text-lg text-gray-800 flex items-center gap-2">
+                      <Printer className="text-indigo-600" size={20} />
+                      إعدادات طباعة الاختبار وتصدير PDF
+                  </h2>
+                  <span className="text-xs text-gray-500">عدّل أحجام الخطوط (7–16 px) والهوامش والمسافات ثم اضغط على زر الطباعة / حفظ كـ PDF</span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                      type="button"
+                      onClick={() => setShowAnswers(prev => !prev)}
+                      className={`px-3 py-2 border font-bold rounded-xl text-xs transition-all cursor-pointer ${
+                        showAnswers
+                          ? 'bg-amber-50 border-amber-300 text-amber-800'
+                          : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
+                      }`}
+                  >
+                      {showAnswers ? 'إخفاء سلالم الحل' : 'إظهار سلالم الحل'}
+                  </button>
+                  <button
+                      type="button"
+                      onClick={() => setShowPrintSettings(prev => !prev)}
+                      className={`px-3 py-2 border font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all cursor-pointer ${
+                        showPrintSettings
+                          ? 'bg-indigo-50 border-indigo-300 text-indigo-800'
+                          : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
+                      }`}
+                  >
+                      <SlidersHorizontal size={15} />
+                      <span>{showPrintSettings ? 'إخفاء إعدادات الطباعة' : 'إظهار إعدادات الطباعة'}</span>
+                  </button>
+                  <button
+                      type="button"
+                      onClick={() => setPrintPreview(false)}
+                      className="px-3.5 py-2 border border-gray-300 font-bold rounded-xl hover:bg-gray-50 text-xs text-gray-700 transition-all cursor-pointer"
+                  >
+                      إغلاق المعاينة
+                  </button>
+                  <button
+                      type="button"
+                      onClick={handleNativePrint}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-xl flex items-center gap-2 text-xs shadow-md transition-all active:scale-95 cursor-pointer"
+                  >
+                      <Printer size={16} />
+                      طباعة / حفظ كـ PDF 🖨️
+                  </button>
+              </div>
             </div>
-            
-            <div className="flex flex-wrap items-center gap-4 w-full md:w-auto">
-                <div className="flex items-center gap-3 bg-indigo-50/60 px-4 py-2 rounded-xl border border-indigo-100/80">
-                    <label className="flex items-center gap-2 cursor-pointer font-bold text-xs text-indigo-950 select-none">
-                        <input
-                            type="checkbox"
-                            checked={useWatermark}
-                            onChange={(e) => setUseWatermark(e.target.checked)}
-                            className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
-                        />
-                        إضافة علامة مائية
-                    </label>
-                    {useWatermark && (
-                        <>
-                            <input
-                                type="text"
-                                value={watermarkText}
-                                onChange={(e) => setWatermarkText(e.target.value)}
-                                placeholder="اكتب العلامة المائية..."
-                                className="p-1 px-3 text-xs border border-indigo-200 rounded-lg focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white shadow-inner font-bold w-40 animate-fade-in"
-                            />
-                            <div className="flex items-center gap-1.5 animate-fade-in border-r border-indigo-200/40 pr-2 mr-1">
-                                <span className="text-[11px] text-indigo-900 font-bold whitespace-nowrap">التكرار:</span>
-                                <select
-                                    value={watermarkRepeats}
-                                    onChange={(e) => setWatermarkRepeats(Number(e.target.value))}
-                                    className="p-1 text-[11px] border border-indigo-200 rounded-lg focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white font-bold cursor-pointer"
-                                >
-                                    <option value={1}>مرة واحدة (1)</option>
-                                    <option value={2}>مرتين (2)</option>
-                                    <option value={3}>3 مرات</option>
-                                </select>
-                            </div>
-                        </>
-                    )}
+
+            {/* Collapsible Print Settings Panel */}
+            {showPrintSettings && (
+              <div className="pt-4 border-t border-gray-100 space-y-4">
+                {/* Row 1: Font Family & Watermark */}
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex items-center gap-2 bg-indigo-50/60 px-3.5 py-2 rounded-xl border border-indigo-100">
+                      <span className="text-xs text-indigo-950 font-black whitespace-nowrap">نوع الخط:</span>
+                      <select
+                          value={printFont}
+                          onChange={(e) => setPrintFont(e.target.value as 'default' | 'cairo' | 'amiri' | 'tajawal' | 'almarai' | 'al-mithaq')}
+                          className="p-1 px-2 text-xs text-indigo-950 border border-indigo-200 rounded-lg focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white font-bold cursor-pointer outline-none"
+                      >
+                          <option value="default">الخط الافتراضي (Cairo)</option>
+                          <option value="cairo">خط Cairo العريض والمميز</option>
+                          <option value="amiri">خط Amiri الأميري للطباعة الكلاسيكية</option>
+                          <option value="tajawal">خط Tajawal الحديث الواضح</option>
+                          <option value="almarai">خط Almarai الأنيق والمريح</option>
+                          <option value="al-mithaq">خط الميثاق العربي Al-Mithaq</option>
+                      </select>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3 bg-indigo-50/60 px-3.5 py-2 rounded-xl border border-indigo-100">
+                      <label className="flex items-center gap-2 cursor-pointer font-bold text-xs text-indigo-950 select-none">
+                          <input
+                              type="checkbox"
+                              checked={useWatermark}
+                              onChange={(e) => setUseWatermark(e.target.checked)}
+                              className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                          />
+                          إضافة علامة مائية
+                      </label>
+                      {useWatermark && (
+                          <>
+                              <input
+                                  type="text"
+                                  value={watermarkText}
+                                  onChange={(e) => setWatermarkText(e.target.value)}
+                                  placeholder="اكتب العلامة المائية..."
+                                  className="p-1 px-2.5 text-xs border border-indigo-200 rounded-lg focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white font-bold w-40"
+                              />
+                              <div className="flex items-center gap-1.5 border-r border-indigo-200/60 pr-2">
+                                  <span className="text-[11px] text-indigo-900 font-bold whitespace-nowrap">التكرار:</span>
+                                  <select
+                                      value={watermarkRepeats}
+                                      onChange={(e) => setWatermarkRepeats(Number(e.target.value))}
+                                      className="p-1 text-[11px] border border-indigo-200 rounded-lg bg-white font-bold cursor-pointer"
+                                  >
+                                      <option value={1}>مرة واحدة (1)</option>
+                                      <option value={2}>مرتين (2)</option>
+                                      <option value={3}>3 مرات</option>
+                                  </select>
+                              </div>
+                          </>
+                      )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={resetPrintSettings}
+                    className="mr-auto px-3 py-2 text-xs font-bold text-slate-600 hover:text-indigo-700 bg-slate-100 hover:bg-indigo-50 rounded-xl border border-slate-200 flex items-center gap-1.5 transition-colors cursor-pointer"
+                    title="استعادة أحجام الخطوط والهوامش الافتراضية"
+                  >
+                    <RotateCcw size={14} />
+                    <span>إعادة ضبط الإعدادات</span>
+                  </button>
                 </div>
 
-                {/* Font selection */}
-                <div className="flex items-center gap-2.5 bg-indigo-50/60 px-4 py-2 rounded-xl border border-indigo-100/80">
-                    <span className="text-xs text-indigo-950 font-black whitespace-nowrap">نوع الخط:</span>
-                    <select
-                        value={printFont}
-                        onChange={(e) => setPrintFont(e.target.value as 'default' | 'cairo' | 'amiri' | 'tajawal' | 'almarai' | 'al-mithaq')}
-                        className="p-1 px-1.5 text-xs text-indigo-950 border border-indigo-200 rounded-lg focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white font-bold cursor-pointer outline-none transition-all"
-                    >
-                        <option value="default">الخط الحالي</option>
-                        <option value="cairo">خط Cairo العريض والمميز</option>
-                        <option value="amiri">خط Amiri الأميري للطباعة الكلاسيكية</option>
-                        <option value="tajawal">خط Tajawal الحديث الواضح</option>
-                        <option value="almarai">خط Almarai الأنيق والمريح</option>
-                        <option value="al-mithaq">خط الميثاق العربي Al-Mithaq</option>
-                    </select>
+                {/* Row 2: Font Sizes (7 - 16 px) */}
+                <div className="bg-slate-50/80 border border-slate-200 rounded-xl p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-black text-slate-800">أحجام الخطوط (من 7 إلى 16 px):</span>
+                    <span className="text-[11px] font-bold text-slate-500">تُطبّق مباشرة على المعاينة وملف PDF</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {[
+                      { key: 'headerFontSize' as const, label: 'الترويسة' },
+                      { key: 'footerFontSize' as const, label: 'التذييل' },
+                      { key: 'watermarkFontSize' as const, label: 'العلامة المائية' },
+                      { key: 'mainHeadingFontSize' as const, label: 'العناوين الرئيسية' },
+                      { key: 'subHeadingFontSize' as const, label: 'العناوين الفرعية' },
+                      { key: 'bodyFontSize' as const, label: 'النص' },
+                    ].map(({ key, label }) => (
+                      <div key={key} className="bg-white border border-slate-200 rounded-xl p-2.5 flex flex-col gap-1.5">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-bold text-slate-700">{label}</span>
+                          <span className="font-black text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-md tabular-nums" dir="ltr">
+                            {printSettings[key]} px
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="range"
+                            min={7}
+                            max={16}
+                            step={1}
+                            value={printSettings[key]}
+                            onChange={(e) => updatePrintSetting(key, clampFontSize(Number(e.target.value)))}
+                            className="flex-1 accent-indigo-600 cursor-pointer"
+                          />
+                          <select
+                            value={printSettings[key]}
+                            onChange={(e) => updatePrintSetting(key, clampFontSize(Number(e.target.value)))}
+                            className="px-1.5 py-0.5 text-[11px] font-bold border border-slate-200 rounded-lg bg-slate-50 text-slate-800 cursor-pointer"
+                            dir="ltr"
+                          >
+                            {[7, 8, 9, 10, 11, 12, 13, 14, 15, 16].map(sz => (
+                              <option key={sz} value={sz}>{sz}px</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
 
-                <div className="flex gap-2 shrink-0 mr-auto md:mr-0">
-                    <button
-                        onClick={() => setPrintPreview(false)}
-                        className="px-4 py-2 border border-gray-300 font-bold rounded-xl hover:bg-gray-50 text-xs text-gray-700 transition-all"
-                    >
-                        إغلاق المعاينة
-                    </button>
-                    <button
-                        onClick={handleNativePrint}
-                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-xl flex items-center gap-2 text-xs shadow-md transition-all scale-100 active:scale-95 cursor-pointer"
-                    >
-                        <Printer size={16} />
-                        معاينة الطباعة / حفظ كـ PDF 🖨️
-                    </button>
+                {/* Row 3: Margins & MCQ Question Spacing */}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                  {/* Page Margins */}
+                  <div className="lg:col-span-2 bg-slate-50/80 border border-slate-200 rounded-xl p-3.5 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-black text-slate-800">هوامش الصفحة (mm):</span>
+                      <span className="text-[11px] font-bold text-slate-500">أعلى / أسفل / يمين / يسار</span>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                      {[
+                        { key: 'marginTop' as const, label: 'علوي' },
+                        { key: 'marginBottom' as const, label: 'سفلي' },
+                        { key: 'marginRight' as const, label: 'أيمن' },
+                        { key: 'marginLeft' as const, label: 'أيسر' },
+                      ].map(({ key, label }) => (
+                        <div key={key} className="bg-white border border-slate-200 rounded-xl p-2 flex flex-col gap-1">
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="font-bold text-slate-700">{label}</span>
+                            <span className="font-black text-indigo-700 tabular-nums" dir="ltr">{printSettings[key]} mm</span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={35}
+                            step={1}
+                            value={printSettings[key]}
+                            onChange={(e) => updatePrintSetting(key, Math.min(35, Math.max(0, Number(e.target.value))))}
+                            className="w-full accent-indigo-600 cursor-pointer"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* MCQ Question Gap */}
+                  <div className="bg-slate-50/80 border border-slate-200 rounded-xl p-3.5 flex flex-col justify-between gap-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-black text-slate-800">المسافة بين أسئلة الاختيار من متعدد:</span>
+                      <span className="text-xs font-black text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-md tabular-nums" dir="ltr">
+                        {printSettings.mcqQuestionGap} px
+                      </span>
+                    </div>
+                    <div className="bg-white border border-slate-200 rounded-xl p-2.5 flex items-center gap-3">
+                      <input
+                        type="range"
+                        min={0}
+                        max={40}
+                        step={1}
+                        value={printSettings.mcqQuestionGap}
+                        onChange={(e) => updatePrintSetting('mcqQuestionGap', Math.min(40, Math.max(0, Number(e.target.value))))}
+                        className="flex-1 accent-indigo-600 cursor-pointer"
+                      />
+                      <input
+                        type="number"
+                        min={0}
+                        max={40}
+                        value={printSettings.mcqQuestionGap}
+                        onChange={(e) => updatePrintSetting('mcqQuestionGap', Math.min(40, Math.max(0, Number(e.target.value) || 0)))}
+                        className="w-14 p-1 text-xs font-bold text-center border border-slate-200 rounded-lg bg-slate-50"
+                        dir="ltr"
+                      />
+                    </div>
+                  </div>
                 </div>
-            </div>
+              </div>
+            )}
         </div>
       )}
 
       {/* Print / View Area (A4 style) */}
-      <div className={`print-area-container bg-white rounded-xl shadow-sm border border-gray-200 p-8 md:p-12 print:!shadow-none print:!border-none print:!p-0 print:!w-full print:!m-0 print:!overflow-visible text-right font-sans relative overflow-hidden max-w-none break-words print-table-wrapper ${printPreview ? 'w-[210mm] shadow-2xl min-h-[297mm] mx-auto' : 'w-full prose'}`} dir="rtl">
-        {/* Dynamic print font style overrides */}
+      <div
+        className={`print-area-container test-print-sheet ${printPreview ? 'is-print-preview w-[210mm] shadow-2xl min-h-[297mm] mx-auto' : 'w-full prose p-8 md:p-12'} bg-white rounded-xl shadow-sm border border-gray-200 print:!shadow-none print:!border-none print:!p-0 print:!w-full print:!m-0 print:!overflow-visible text-right font-sans relative overflow-hidden max-w-none break-words print-table-wrapper`}
+        style={printPreview ? {
+          paddingTop: `${printSettings.marginTop}mm`,
+          paddingBottom: `${printSettings.marginBottom}mm`,
+          paddingRight: `${printSettings.marginRight}mm`,
+          paddingLeft: `${printSettings.marginLeft}mm`,
+        } : undefined}
+        dir="rtl"
+      >
+        {/* Dynamic print font, sizes, margins & spacing style overrides */}
         <style dangerouslySetInnerHTML={{ __html: `
           @import url('https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400;1,700&family=Tajawal:wght@400;500;700;800;900&family=Almarai:wght@300;400;700;800&family=Cairo:wght@400;500;600;700;800;900&display=swap');
           
@@ -971,20 +1339,7 @@ const parseQuestionContent = (q: any): ParsedQuestion => {
             src: local('Al-Mithaq'), local('Al Mithaq'), local('Mithaq'), local('Mithaq Regular'), local('Al-Mithaq Regular'), local('Al_Mithaq');
           }
 
-          @media print {
-            .print-area-container, .print-area-container *:not(.katex):not(.katex *) {
-              font-family: ${
-                printFont === 'default' ? "'Cairo', sans-serif" :
-                printFont === 'cairo' ? "'Cairo', sans-serif" :
-                printFont === 'amiri' ? "'Amiri', serif" :
-                printFont === 'tajawal' ? "'Tajawal', sans-serif" :
-                printFont === 'almarai' ? "'Almarai', sans-serif" :
-                printFont === 'al-mithaq' ? "'Al-Mithaq', 'Cairo', sans-serif" :
-                "'Cairo', sans-serif"
-              } !important;
-            }
-          }
-          .print-area-container, .print-area-container *:not(.katex):not(.katex *) {
+          .test-print-sheet, .test-print-sheet *:not(.katex):not(.katex *) {
             font-family: ${
               printFont === 'default' ? "'Cairo', sans-serif" :
               printFont === 'cairo' ? "'Cairo', sans-serif" :
@@ -995,14 +1350,129 @@ const parseQuestionContent = (q: any): ParsedQuestion => {
               "'Cairo', sans-serif"
             } !important;
           }
+
+          ${printPreview ? `
+            .test-print-sheet.is-print-preview .print-test-header,
+            .test-print-sheet.is-print-preview .print-test-header *:not(input):not(button):not(select) {
+              font-size: ${printSettings.headerFontSize}px !important;
+              line-height: 1.5 !important;
+            }
+            .test-print-sheet.is-print-preview .print-main-heading,
+            .test-print-sheet.is-print-preview .math-markdown-content h1,
+            .test-print-sheet.is-print-preview .math-markdown-content h2 {
+              font-size: ${printSettings.mainHeadingFontSize}px !important;
+              line-height: 1.45 !important;
+            }
+            .test-print-sheet.is-print-preview .print-sub-heading,
+            .test-print-sheet.is-print-preview .print-sub-heading *,
+            .test-print-sheet.is-print-preview .math-markdown-content h3,
+            .test-print-sheet.is-print-preview .math-markdown-content h4 {
+              font-size: ${printSettings.subHeadingFontSize}px !important;
+              line-height: 1.45 !important;
+            }
+            .test-print-sheet.is-print-preview .print-body-text,
+            .test-print-sheet.is-print-preview .print-body-text .math-markdown-content,
+            .test-print-sheet.is-print-preview .print-body-text .math-markdown-content p,
+            .test-print-sheet.is-print-preview .print-body-text .math-markdown-content li,
+            .test-print-sheet.is-print-preview .print-body-text .math-markdown-content span:not(.katex):not(.katex *),
+            .test-print-sheet.is-print-preview .print-body-text .math-markdown-content strong,
+            .test-print-sheet.is-print-preview .print-body-text td {
+              font-size: ${printSettings.bodyFontSize}px !important;
+              line-height: 1.75 !important;
+            }
+            .test-print-sheet.is-print-preview .print-test-footer,
+            .test-print-sheet.is-print-preview .print-test-footer * {
+              font-size: ${printSettings.footerFontSize}px !important;
+            }
+            .test-print-sheet.is-print-preview .screen-watermark-overlay div {
+              font-size: ${printSettings.watermarkFontSize}px !important;
+            }
+            .test-print-sheet.is-print-preview .print-mcq-list {
+              display: flex !important;
+              flex-direction: column !important;
+              gap: ${printSettings.mcqQuestionGap}px !important;
+            }
+            .test-print-sheet.is-print-preview .print-mcq-list > .print-mcq-item {
+              margin-top: 0 !important;
+              margin-bottom: 0 !important;
+            }
+          ` : ''}
+
+          @media print {
+            @page {
+              size: A4 portrait;
+              margin-top: ${printSettings.marginTop}mm !important;
+              margin-bottom: ${printSettings.marginBottom}mm !important;
+              margin-right: ${printSettings.marginRight}mm !important;
+              margin-left: ${printSettings.marginLeft}mm !important;
+            }
+
+            .test-print-sheet {
+              padding: 0 !important;
+            }
+
+            .test-print-sheet .print-test-header,
+            .test-print-sheet .print-test-header *:not(input):not(button):not(select) {
+              font-size: ${printSettings.headerFontSize}px !important;
+              line-height: 1.5 !important;
+            }
+
+            .test-print-sheet .print-main-heading,
+            .test-print-sheet .math-markdown-content h1,
+            .test-print-sheet .math-markdown-content h2 {
+              font-size: ${printSettings.mainHeadingFontSize}px !important;
+              line-height: 1.45 !important;
+            }
+
+            .test-print-sheet .print-sub-heading,
+            .test-print-sheet .print-sub-heading *,
+            .test-print-sheet .math-markdown-content h3,
+            .test-print-sheet .math-markdown-content h4 {
+              font-size: ${printSettings.subHeadingFontSize}px !important;
+              line-height: 1.45 !important;
+            }
+
+            .test-print-sheet .print-body-text,
+            .test-print-sheet .print-body-text .math-markdown-content,
+            .test-print-sheet .print-body-text .math-markdown-content p,
+            .test-print-sheet .print-body-text .math-markdown-content li,
+            .test-print-sheet .print-body-text .math-markdown-content span:not(.katex):not(.katex *),
+            .test-print-sheet .print-body-text .math-markdown-content strong,
+            .test-print-sheet .print-body-text td {
+              font-size: ${printSettings.bodyFontSize}px !important;
+              line-height: 1.75 !important;
+            }
+
+            .test-print-sheet .print-test-footer,
+            .test-print-sheet .print-test-footer * {
+              font-size: ${printSettings.footerFontSize}px !important;
+            }
+
+            .test-print-sheet .print-mcq-list {
+              display: flex !important;
+              flex-direction: column !important;
+              gap: ${printSettings.mcqQuestionGap}px !important;
+            }
+
+            .test-print-sheet .print-mcq-list > .print-mcq-item {
+              margin-top: 0 !important;
+              margin-bottom: 0 !important;
+            }
+          }
         `}} />
         {/* Watermark Overlay */}
         {useWatermark && watermarkText && (
           <>
             {/* Screen Preview Watermark */}
-            <div className="absolute inset-0 z-[99999] overflow-hidden pointer-events-none select-none opacity-[0.05] flex flex-col justify-around items-center rotate-[-30deg] p-12 no-print" style={{ fontFamily: "'Cairo', sans-serif" }}>
+            <div className="screen-watermark-overlay absolute inset-0 z-[99999] overflow-hidden pointer-events-none select-none opacity-[0.07] flex flex-col justify-around items-center rotate-[-30deg] p-12 no-print" style={{ fontFamily: "'Cairo', sans-serif" }}>
               {Array.from({ length: watermarkRepeats }).map((_, idx) => (
-                <div key={idx} className="text-3xl md:text-5xl font-sans font-black text-black select-none whitespace-nowrap">{watermarkText}</div>
+                <div
+                  key={idx}
+                  className="font-sans font-black text-black select-none whitespace-nowrap"
+                  style={{ fontSize: `${printSettings.watermarkFontSize}px` }}
+                >
+                  {watermarkText}
+                </div>
               ))}
             </div>
             {/* Print-only CSS injection to ensure it overlays on all printed pages and containers */}
@@ -1022,20 +1492,18 @@ const parseQuestionContent = (q: any): ParsedQuestion => {
                   flex-direction: column !important;
                   justify-content: space-around !important;
                   align-items: center !important;
-                  opacity: 0.1 !important;
+                  opacity: 0.12 !important;
                   color: #000000 !important;
-                  font-family: 'Cairo', sans-serif !important;
                   font-weight: 900 !important;
-                  transform: rotate(-35deg) scale(1.3) !important;
+                  transform: rotate(-35deg) scale(1.2) !important;
                   transform-origin: center !important;
                 }
                 .print-watermark-overlay div {
-                  font-size: 3.5rem !important;
+                  font-size: ${printSettings.watermarkFontSize}px !important;
                   white-space: nowrap !important;
                   margin: 20px 0 !important;
                   text-align: center !important;
                   user-select: none !important;
-                  font-family: 'Cairo', sans-serif !important;
                 }
               }
             `}} />
@@ -1047,69 +1515,394 @@ const parseQuestionContent = (q: any): ParsedQuestion => {
           </>
         )}
         {/* Header */}
-        <div className="text-center border-b-2 border-black pb-4 mb-8 print-table-header w-full">
-            {isEditing ? (
-                <input 
-                    className="text-2xl font-bold mb-2 text-center w-full bg-emerald-50 border border-emerald-300 rounded px-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                    value={test.title}
-                    onChange={(e) => {
-                        const newTitle = e.target.value;
-                        const newTestData = { ...test.testData, title: newTitle };
-                        setTest({ ...test, title: newTitle, testData: newTestData });
-                        setHasUnsavedChanges(true);
-                    }}
-                />
-            ) : (
-                <h1 className="text-2xl font-bold mb-2">{test.title}</h1>
+        <div className="print-test-header text-center border-b-2 border-black pb-4 mb-8 print-table-header w-full">
+            {isEditing && (
+              <div className="no-print mb-4 p-3 bg-indigo-50/70 border border-indigo-200 rounded-xl text-right space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-black text-indigo-900">تحرير الترويسة (يمكنك تعديل أي حقل أو حذف أي قسم منها):</span>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {!headerConfig.showCustomNote && (
+                      <button
+                        type="button"
+                        onClick={() => updateHeaderConfig({ showCustomNote: true, customNote: headerConfig.customNote || 'تعليمات أو ملاحظة في الترويسة...' })}
+                        className="px-2.5 py-1 text-[11px] font-bold bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-100 rounded-lg cursor-pointer"
+                      >
+                        + إضافة ملاحظة للترويسة
+                      </button>
+                    )}
+                    {!headerConfig.showTitle && (
+                      <button type="button" onClick={() => updateHeaderConfig({ showTitle: true })} className="px-2 py-1 text-[11px] font-bold bg-white border border-emerald-200 text-emerald-700 rounded-lg cursor-pointer">
+                        + استعادة العنوان
+                      </button>
+                    )}
+                    {!headerConfig.showAcademicRow && (
+                      <button type="button" onClick={() => updateHeaderConfig({ showAcademicRow: true })} className="px-2 py-1 text-[11px] font-bold bg-white border border-emerald-200 text-emerald-700 rounded-lg cursor-pointer">
+                        + استعادة البيانات الأكاديمية
+                      </button>
+                    )}
+                    {headerConfig.showAcademicRow && (!headerConfig.showGrade || !headerConfig.showSubject || !headerConfig.showPart || !headerConfig.showUnit || !headerConfig.showTopic) && (
+                      <button
+                        type="button"
+                        onClick={() => updateHeaderConfig({ showGrade: true, showSubject: true, showPart: true, showUnit: true, showTopic: true })}
+                        className="px-2 py-1 text-[11px] font-bold bg-white border border-emerald-200 text-emerald-700 rounded-lg cursor-pointer"
+                      >
+                        + استعادة حقول الصف/الوحدة
+                      </button>
+                    )}
+                    {!headerConfig.showMetaRow && (
+                      <button type="button" onClick={() => updateHeaderConfig({ showMetaRow: true })} className="px-2 py-1 text-[11px] font-bold bg-white border border-emerald-200 text-emerald-700 rounded-lg cursor-pointer">
+                        + استعادة السلسلة والمدرّس والزمن
+                      </button>
+                    )}
+                    {headerConfig.showMetaRow && (!headerConfig.showSeries || !headerConfig.showTeacher || !headerConfig.showTime) && (
+                      <button
+                        type="button"
+                        onClick={() => updateHeaderConfig({ showSeries: true, showTeacher: true, showTime: true })}
+                        className="px-2 py-1 text-[11px] font-bold bg-white border border-emerald-200 text-emerald-700 rounded-lg cursor-pointer"
+                      >
+                        + استعادة حقول السلسلة/الزمن
+                      </button>
+                    )}
+                    {!headerConfig.showPrintSubBar && (
+                      <button type="button" onClick={() => updateHeaderConfig({ showPrintSubBar: true })} className="px-2 py-1 text-[11px] font-bold bg-white border border-emerald-200 text-emerald-700 rounded-lg cursor-pointer">
+                        + استعادة شريط المنصة
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
             )}
-            <div className="flex flex-wrap justify-between items-center text-xs font-bold mt-2 gap-2 text-gray-700 border-t border-gray-200 pt-2 print:border-black">
-                <div className="flex items-center gap-4 flex-wrap">
-                    <span>الصف: <strong className="text-black">{test.grade}</strong></span>
-                    <span>المادة: <strong className="text-black">{test.subject}</strong></span>
-                    {test.part && <span>الجزء: <strong className="text-black">{test.part}</strong></span>}
-                    {test.unit && <span>الوحدة: <strong className="text-black">{test.unit}</strong></span>}
-                    {test.topic && <span>الموضوع: <strong className="text-black">{test.topic}</strong></span>}
+
+            {/* Header Title */}
+            {headerConfig.showTitle && (
+              isEditing ? (
+                <div className="flex items-center gap-2 mb-2 no-print">
+                  <input
+                    className="text-2xl font-bold text-center flex-1 bg-emerald-50 border border-emerald-300 rounded-xl px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    value={test.title}
+                    onChange={(e) => updateTestRootField({ title: e.target.value })}
+                    placeholder="عنوان الاختبار..."
+                  />
+                  <button
+                    type="button"
+                    onClick={() => updateHeaderConfig({ showTitle: false })}
+                    className="p-2 bg-red-50 hover:bg-red-100 text-red-600 rounded-xl border border-red-200 transition-colors shrink-0 cursor-pointer"
+                    title="حذف العنوان من الترويسة"
+                  >
+                    <Trash size={16} />
+                  </button>
                 </div>
-                <div className="flex items-center gap-4 flex-wrap">
-                    {test.seriesName && <span>السلسلة: <strong className="text-indigo-800 print:text-black">{test.seriesName}</strong></span>}
-                    {test.teacherName && <span>إعداد المدرّس: <strong className="text-indigo-900 print:text-black">{test.teacherName}</strong></span>}
-                    <div>
-                       الزمن التقديري: {isEditing ? (
-                           <input 
-                               type="number"
-                               className="w-16 p-1 border border-emerald-300 rounded bg-emerald-50 text-center font-sans h-8 align-middle inline-block"
-                               value={data.estimatedTimeMinutes || 0}
-                               onChange={(e) => {
-                                   const newTestData = { ...test.testData, estimatedTimeMinutes: parseInt(e.target.value) || 0 };
-                                   setTest({ ...test, testData: newTestData });
-                                   setHasUnsavedChanges(true);
-                               }}
-                           />
-                       ) : (
-                           <strong className="text-black">{data.estimatedTimeMinutes || 0}</strong>
-                       )} دقيقة
+              ) : (
+                <h1 className="print-test-title text-2xl font-bold mb-2">{test.title}</h1>
+              )
+            )}
+
+            {/* Academic & Meta Info Row */}
+            {(headerConfig.showAcademicRow || headerConfig.showMetaRow) && (
+              <div className="flex flex-wrap justify-between items-center text-xs font-bold mt-2 gap-3 text-gray-700 border-t border-gray-200 pt-2 print:border-black">
+                  {headerConfig.showAcademicRow && (
+                    <div className={`flex items-center gap-3 flex-wrap ${isEditing ? 'bg-slate-50 p-2 rounded-xl border border-slate-200 w-full justify-between' : ''}`}>
+                        <div className="flex items-center gap-3 flex-wrap">
+                          {headerConfig.showGrade && (
+                            isEditing ? (
+                              <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-lg px-2 py-1">
+                                <span>الصف:</span>
+                                <input
+                                  type="text"
+                                  value={test.grade || ''}
+                                  onChange={(e) => updateTestRootField({ grade: e.target.value })}
+                                  className="w-28 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 text-xs font-bold text-black"
+                                />
+                                <button type="button" onClick={() => updateHeaderConfig({ showGrade: false })} className="text-red-500 hover:text-red-700 cursor-pointer" title="حذف الصف"><X size={13} /></button>
+                              </div>
+                            ) : (
+                              test.grade ? <span>الصف: <strong className="text-black">{test.grade}</strong></span> : null
+                            )
+                          )}
+                          {headerConfig.showSubject && (
+                            isEditing ? (
+                              <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-lg px-2 py-1">
+                                <span>المادة:</span>
+                                <input
+                                  type="text"
+                                  value={test.subject || ''}
+                                  onChange={(e) => updateTestRootField({ subject: e.target.value })}
+                                  className="w-24 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 text-xs font-bold text-black"
+                                />
+                                <button type="button" onClick={() => updateHeaderConfig({ showSubject: false })} className="text-red-500 hover:text-red-700 cursor-pointer" title="حذف المادة"><X size={13} /></button>
+                              </div>
+                            ) : (
+                              test.subject ? <span>المادة: <strong className="text-black">{test.subject}</strong></span> : null
+                            )
+                          )}
+                          {headerConfig.showPart && (
+                            isEditing ? (
+                              <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-lg px-2 py-1">
+                                <span>الجزء:</span>
+                                <input
+                                  type="text"
+                                  value={test.part || ''}
+                                  onChange={(e) => updateTestRootField({ part: e.target.value })}
+                                  placeholder="اختياري..."
+                                  className="w-24 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 text-xs font-bold text-black"
+                                />
+                                <button type="button" onClick={() => updateHeaderConfig({ showPart: false })} className="text-red-500 hover:text-red-700 cursor-pointer" title="حذف الجزء"><X size={13} /></button>
+                              </div>
+                            ) : (
+                              test.part ? <span>الجزء: <strong className="text-black">{test.part}</strong></span> : null
+                            )
+                          )}
+                          {headerConfig.showUnit && (
+                            isEditing ? (
+                              <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-lg px-2 py-1">
+                                <span>الوحدة:</span>
+                                <input
+                                  type="text"
+                                  value={test.unit || ''}
+                                  onChange={(e) => updateTestRootField({ unit: e.target.value })}
+                                  placeholder="اختياري..."
+                                  className="w-28 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 text-xs font-bold text-black"
+                                />
+                                <button type="button" onClick={() => updateHeaderConfig({ showUnit: false })} className="text-red-500 hover:text-red-700 cursor-pointer" title="حذف الوحدة"><X size={13} /></button>
+                              </div>
+                            ) : (
+                              test.unit ? <span>الوحدة: <strong className="text-black">{test.unit}</strong></span> : null
+                            )
+                          )}
+                          {headerConfig.showTopic && (
+                            isEditing ? (
+                              <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-lg px-2 py-1">
+                                <span>الموضوع:</span>
+                                <input
+                                  type="text"
+                                  value={test.topic || ''}
+                                  onChange={(e) => updateTestRootField({ topic: e.target.value })}
+                                  placeholder="اختياري..."
+                                  className="w-32 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 text-xs font-bold text-black"
+                                />
+                                <button type="button" onClick={() => updateHeaderConfig({ showTopic: false })} className="text-red-500 hover:text-red-700 cursor-pointer" title="حذف الموضوع"><X size={13} /></button>
+                              </div>
+                            ) : (
+                              test.topic ? <span>الموضوع: <strong className="text-black">{test.topic}</strong></span> : null
+                            )
+                          )}
+                        </div>
+                        {isEditing && (
+                          <button
+                            type="button"
+                            onClick={() => updateHeaderConfig({ showAcademicRow: false })}
+                            className="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg border border-red-200 text-[11px] font-bold flex items-center gap-1 shrink-0 cursor-pointer"
+                          >
+                            <Trash size={12} /> حذف الشريط
+                          </button>
+                        )}
                     </div>
+                  )}
+
+                  {headerConfig.showMetaRow && (
+                    <div className={`flex items-center gap-3 flex-wrap ${isEditing ? 'bg-slate-50 p-2 rounded-xl border border-slate-200 w-full justify-between' : ''}`}>
+                        <div className="flex items-center gap-3 flex-wrap">
+                          {headerConfig.showSeries && (
+                            isEditing ? (
+                              <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-lg px-2 py-1">
+                                <span>السلسلة:</span>
+                                <input
+                                  type="text"
+                                  value={test.seriesName || ''}
+                                  onChange={(e) => updateTestRootField({ seriesName: e.target.value })}
+                                  placeholder="اسم السلسلة..."
+                                  className="w-32 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 text-xs font-bold text-black"
+                                />
+                                <button type="button" onClick={() => updateHeaderConfig({ showSeries: false })} className="text-red-500 hover:text-red-700 cursor-pointer" title="حذف السلسلة"><X size={13} /></button>
+                              </div>
+                            ) : (
+                              test.seriesName ? <span>السلسلة: <strong className="text-indigo-800 print:text-black">{test.seriesName}</strong></span> : null
+                            )
+                          )}
+                          {headerConfig.showTeacher && (
+                            isEditing ? (
+                              <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-lg px-2 py-1">
+                                <span>إعداد المدرّس:</span>
+                                <input
+                                  type="text"
+                                  value={test.teacherName || ''}
+                                  onChange={(e) => updateTestRootField({ teacherName: e.target.value })}
+                                  placeholder="اسم المدرّس..."
+                                  className="w-32 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 text-xs font-bold text-black"
+                                />
+                                <button type="button" onClick={() => updateHeaderConfig({ showTeacher: false })} className="text-red-500 hover:text-red-700 cursor-pointer" title="حذف اسم المدرّس"><X size={13} /></button>
+                              </div>
+                            ) : (
+                              test.teacherName ? <span>إعداد المدرّس: <strong className="text-indigo-900 print:text-black">{test.teacherName}</strong></span> : null
+                            )
+                          )}
+                          {headerConfig.showTime && (
+                            isEditing ? (
+                              <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-lg px-2 py-1">
+                                <span>الزمن التقديري:</span>
+                                <input
+                                  type="number"
+                                  className="w-16 p-0.5 border border-emerald-300 rounded bg-emerald-50 text-center font-sans text-xs font-bold text-black"
+                                  value={data.estimatedTimeMinutes || 0}
+                                  onChange={(e) => {
+                                    const newTestData = { ...test.testData, estimatedTimeMinutes: parseInt(e.target.value) || 0 };
+                                    setTest({ ...test, testData: newTestData });
+                                    setHasUnsavedChanges(true);
+                                  }}
+                                />
+                                <span>دقيقة</span>
+                                <button type="button" onClick={() => updateHeaderConfig({ showTime: false })} className="text-red-500 hover:text-red-700 cursor-pointer" title="حذف الزمن التقديري"><X size={13} /></button>
+                              </div>
+                            ) : (
+                              <div>الزمن التقديري: <strong className="text-black">{data.estimatedTimeMinutes || 0}</strong> دقيقة</div>
+                            )
+                          )}
+                        </div>
+                        {isEditing && (
+                          <button
+                            type="button"
+                            onClick={() => updateHeaderConfig({ showMetaRow: false })}
+                            className="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg border border-red-200 text-[11px] font-bold flex items-center gap-1 shrink-0 cursor-pointer"
+                          >
+                            <Trash size={12} /> حذف الشريط
+                          </button>
+                        )}
+                    </div>
+                  )}
+              </div>
+            )}
+
+            {/* Optional Custom Header Note */}
+            {headerConfig.showCustomNote && (
+              isEditing ? (
+                <div className="flex items-center gap-2 mt-2 no-print">
+                  <input
+                    type="text"
+                    value={headerConfig.customNote}
+                    onChange={(e) => updateHeaderConfig({ customNote: e.target.value })}
+                    placeholder="اكتب ملاحظة أو سطراً إضافياً في الترويسة..."
+                    className="flex-1 text-center text-xs font-bold bg-amber-50 border border-amber-300 rounded-lg px-3 py-1.5"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => updateHeaderConfig({ showCustomNote: false })}
+                    className="p-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg border border-red-200 cursor-pointer"
+                    title="حذف الملاحظة"
+                  >
+                    <Trash size={14} />
+                  </button>
                 </div>
-            </div>
-            {/* Platform name in header for first page print */}
-            <div className="hidden print:flex justify-between items-center text-[10px] font-bold mt-3 text-gray-600 border-t border-gray-300 pt-1">
-                <span>{test.seriesName || 'سلسلة التعلم الذكي'}</span>
-                <span>المدرّس: {test.teacherName || 'حسن راشد العلي'}</span>
-                <span>تم إعداد وتنسيق هذا الاختبار عبر منصة التعلّم الذكي</span>
-            </div>
+              ) : (
+                headerConfig.customNote ? (
+                  <div className="text-xs font-bold text-gray-700 mt-2">{headerConfig.customNote}</div>
+                ) : null
+              )
+            )}
+
+            {/* Platform name in header for print & preview */}
+            {headerConfig.showPrintSubBar && (
+              isEditing ? (
+                <div className="flex flex-wrap items-center justify-between gap-2 mt-3 p-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-gray-700 no-print">
+                  <span className="text-gray-500">شريط الترويسة السفلي (يظهر في الطباعة):</span>
+                  <input
+                    type="text"
+                    value={headerConfig.printSubBarText}
+                    onChange={(e) => updateHeaderConfig({ printSubBarText: e.target.value })}
+                    className="flex-1 min-w-[200px] bg-emerald-50 border border-emerald-300 rounded-lg px-2.5 py-1 text-xs font-bold"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => updateHeaderConfig({ showPrintSubBar: false })}
+                    className="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg border border-red-200 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                  >
+                    <Trash size={12} /> حذف الشريط
+                  </button>
+                </div>
+              ) : (
+                <div className={`${printPreview ? 'flex' : 'hidden print:flex'} print-test-subbar justify-between items-center text-[10px] font-bold mt-3 text-gray-600 border-t border-gray-300 pt-1`}>
+                    {headerConfig.showSeries && <span>{test.seriesName || 'سلسلة التعلم الذكي'}</span>}
+                    {headerConfig.showTeacher && <span>المدرّس: {test.teacherName || 'حسن راشد العلي'}</span>}
+                    <span>{headerConfig.printSubBarText}</span>
+                </div>
+              )
+            )}
         </div>
 
         {/* Sections */}
         <div className="print-table-body w-full">
             {data.sections?.map((section: any, sIdx: number) => {
-                if (!section.questions || section.questions.length === 0) return null;
+                if (!isEditing && (!section.questions || section.questions.length === 0)) return null;
                 const isMcq = getSectionCategory(section, sIdx) === 'mcq';
                 return (
                     <div key={sIdx} className="mb-8 print:mb-4">
-                        <h2 className="text-xl font-bold bg-gray-100 p-2 rounded mb-4 print:mb-2 print:bg-transparent print:border-b print:border-black">{section.title}</h2>
-                    <div className="space-y-6 print:space-y-1">
-                        {section.questions.map((q: any, qIdx: number) => (
-                            <div key={qIdx} className={`mr-0 group relative border border-transparent hover:border-gray-200 p-2 print:p-1 rounded-lg transition-colors ${showAnswers ? 'print:break-inside-auto' : 'print:break-inside-avoid'}`}>
+                        {isEditing ? (
+                          <div className="no-print mb-3 p-3 bg-indigo-50/70 border border-indigo-200 rounded-xl flex flex-wrap items-center gap-2">
+                            <input
+                              type="text"
+                              value={section.title || ''}
+                              onChange={(e) => handleUpdateSection(sIdx, { title: e.target.value })}
+                              placeholder="عنوان القسم الرئيسي (مثال: أولاً: اختر الإجابة الصحيحة...)"
+                              className="flex-1 min-w-[220px] text-base font-bold bg-white border border-indigo-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            />
+                            <select
+                              value={section.sectionType || 'questions'}
+                              onChange={(e) => handleUpdateSection(sIdx, { sectionType: e.target.value })}
+                              className="px-2.5 py-1.5 text-xs font-bold bg-white border border-indigo-300 rounded-lg text-indigo-900 cursor-pointer"
+                              title="نوع القسم"
+                            >
+                              <option value="mcq">اختيار من متعدد (أولاً)</option>
+                              <option value="questions">أسئلة (ثانياً)</option>
+                              <option value="exercises">تمارين (ثالثاً)</option>
+                              <option value="problems">مسائل (رابعاً)</option>
+                            </select>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleMoveSection(sIdx, -1)}
+                                disabled={sIdx === 0}
+                                className="p-1.5 bg-white border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-100 disabled:opacity-40 cursor-pointer"
+                                title="تحريك القسم للأعلى"
+                              >
+                                <ArrowUp size={15} />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleMoveSection(sIdx, 1)}
+                                disabled={sIdx === (data.sections?.length || 1) - 1}
+                                className="p-1.5 bg-white border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-100 disabled:opacity-40 cursor-pointer"
+                                title="تحريك القسم للأسفل"
+                              >
+                                <ArrowDown size={15} />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleAddQuestion(sIdx, (section.questions?.length || 0) - 1)}
+                                className="px-2.5 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer"
+                                title="إضافة سؤال لهذا القسم"
+                              >
+                                <Plus size={14} /> سؤال
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveSection(sIdx)}
+                                className="px-2.5 py-1.5 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer"
+                                title="حذف القسم بالكامل"
+                              >
+                                <Trash size={14} /> حذف القسم
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <h2 className="print-main-heading text-xl font-bold bg-gray-100 p-2 rounded mb-4 print:mb-2 print:bg-transparent print:border-b print:border-black">{section.title}</h2>
+                        )}
+                    {isEditing && (!section.questions || section.questions.length === 0) && (
+                      <div className="no-print p-4 border-2 border-dashed border-gray-300 rounded-xl text-center text-xs font-bold text-gray-500">
+                        هذا القسم فارغ حالياً — اضغط على «+ سؤال» في شريط القسم لإضافة أسئلة.
+                      </div>
+                    )}
+                    <div className={`${isMcq ? 'print-mcq-list space-y-6' : 'space-y-6 print:space-y-1'}`}>
+                        {(section.questions || []).map((q: any, qIdx: number) => (
+                            <div key={qIdx} className={`${isMcq ? 'print-mcq-item' : ''} mr-0 group relative border border-transparent hover:border-gray-200 p-2 print:p-1 rounded-lg transition-colors ${showAnswers ? 'print:break-inside-auto' : 'print:break-inside-avoid'}`}>
                                 <div className="absolute top-2.5 left-2.5 z-10 print:hidden flex items-center gap-1.5">
                                     <button 
                                         type="button"
@@ -1251,7 +2044,7 @@ const parseQuestionContent = (q: any): ParsedQuestion => {
                                                         ? `${q.svgCode}\n${q.text || ''}`
                                                         : (q.text || '');
                                                     return (
-                                                        <div className="w-full text-gray-900 leading-relaxed font-bold">
+                                                        <div className="print-body-text w-full text-gray-900 leading-relaxed font-bold">
                                                             <MathRenderer className="w-full [&_p]:mb-2 [&_p]:last:mb-0" content={mcqFullContent} />
                                                         </div>
                                                     );
@@ -1261,7 +2054,7 @@ const parseQuestionContent = (q: any): ParsedQuestion => {
                                         
                                         {/* MCQ Options with clear-both */}
                                         {q.options && (
-                                            <div className="w-full mt-3 mb-2 break-inside-avoid clear-both">
+                                            <div className="print-body-text w-full mt-3 mb-2 break-inside-avoid clear-both">
                                                 <table className="w-full border-collapse border border-gray-300 print:border-black text-center" dir="rtl">
                                                     <tbody>
                                                         <tr>
@@ -1395,7 +2188,7 @@ const parseQuestionContent = (q: any): ParsedQuestion => {
                                                         ? `${q.svgCode}\n${rawFullText}`
                                                         : rawFullText;
                                                     return (
-                                                        <div className="w-full text-gray-900 leading-relaxed font-normal text-sm overflow-visible">
+                                                        <div className="print-body-text w-full text-gray-900 leading-relaxed font-normal text-sm overflow-visible">
                                                             <MathRenderer className="w-full overflow-visible [&_p]:mb-2 [&_p]:last:mb-0" content={unifiedContent} />
                                                         </div>
                                                     );
@@ -1408,7 +2201,7 @@ const parseQuestionContent = (q: any): ParsedQuestion => {
                                 {/* Solution */}
                                 {showAnswers && (q.solution || q.solutionSvgCode) && (
                                     <div className={`mt-3.5 p-4 bg-yellow-50 border border-yellow-200 rounded-xl text-sm text-yellow-950 break-inside-avoid print:break-inside-auto flex flex-col min-h-fit overflow-visible clear-both ${!showAnswers ? 'no-print' : 'print:bg-gray-50 print:border-gray-300'}`}>
-                                        <div className="font-bold mb-2 text-yellow-900 flex items-center justify-between border-b border-yellow-200/60 pb-1.5">
+                                        <div className="print-sub-heading font-bold mb-2 text-yellow-900 flex items-center justify-between border-b border-yellow-200/60 pb-1.5">
                                             <span className="flex items-center gap-1.5">
                                                 <CheckCircle2 size={15} className="text-emerald-700" />
                                                 <span>الحل وسلم التصحيح:</span>
@@ -1454,7 +2247,7 @@ const parseQuestionContent = (q: any): ParsedQuestion => {
                                                     ? `${q.solutionSvgCode}\n${q.solution || ''}`
                                                     : (q.solution || '');
                                                 return (
-                                                    <div className="w-full leading-relaxed overflow-visible">
+                                                    <div className="print-body-text w-full leading-relaxed overflow-visible">
                                                         <MathRenderer className="w-full overflow-visible [&_p]:mb-2 [&_p]:last:mb-0" content={fullSolution} />
                                                     </div>
                                                 );
@@ -1469,17 +2262,121 @@ const parseQuestionContent = (q: any): ParsedQuestion => {
           );
         })}
 
-        <div className="text-center font-bold text-lg mt-12 py-4 border-t-2 border-dashed border-gray-300 print:border-black break-inside-avoid">
-            انتهت الأسئلة
-        </div>
+        {/* Add Main Section Control in Edit Mode */}
+        {isEditing && (
+          <div className="no-print my-6 p-4 bg-slate-50 border-2 border-dashed border-indigo-200 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-3">
+            <span className="text-xs font-black text-indigo-900">إضافة قسم أساسي جديد للاختبار:</span>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => handleAddSection('mcq', 'أولاً: اختر الإجابة الصحيحة في كل مما يأتي:')}
+                className="px-3 py-1.5 bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold cursor-pointer"
+              >
+                + قسم اختيار من متعدد
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAddSection('questions', 'ثانياً: أجب عن الأسئلة الآتية:')}
+                className="px-3 py-1.5 bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold cursor-pointer"
+              >
+                + قسم أسئلة
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAddSection('exercises', 'ثالثاً: حل التمارين الآتية:')}
+                className="px-3 py-1.5 bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold cursor-pointer"
+              >
+                + قسم تمارين
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAddSection('problems', 'رابعاً: حل المسألتين الآتيتين:')}
+                className="px-3 py-1.5 bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold cursor-pointer"
+              >
+                + قسم مسائل
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* End Label ("انتهت الأسئلة") */}
+        {headerConfig.showEndLabel ? (
+          isEditing ? (
+            <div className="no-print flex items-center justify-center gap-2 mt-8 py-3 border-t-2 border-dashed border-gray-300">
+              <input
+                type="text"
+                value={headerConfig.endLabel}
+                onChange={(e) => updateHeaderConfig({ endLabel: e.target.value })}
+                className="text-center font-bold text-base bg-emerald-50 border border-emerald-300 rounded-lg px-4 py-1"
+              />
+              <button
+                type="button"
+                onClick={() => updateHeaderConfig({ showEndLabel: false })}
+                className="p-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg border border-red-200 cursor-pointer"
+                title="حذف عبارة نهاية الأسئلة"
+              >
+                <Trash size={14} />
+              </button>
+            </div>
+          ) : (
+            <div className="print-sub-heading text-center font-bold text-lg mt-12 py-4 border-t-2 border-dashed border-gray-300 print:border-black break-inside-avoid">
+              {headerConfig.endLabel}
+            </div>
+          )
+        ) : (
+          isEditing && (
+            <div className="no-print flex justify-center mt-6">
+              <button
+                type="button"
+                onClick={() => updateHeaderConfig({ showEndLabel: true })}
+                className="px-3 py-1 text-xs font-bold bg-white border border-emerald-200 text-emerald-700 rounded-lg cursor-pointer"
+              >
+                + استعادة عبارة «انتهت الأسئلة»
+              </button>
+            </div>
+          )
+        )}
         </div>
         
         {/* Print Footer */}
-        <div className="hidden print:table-footer-group">
-            <div className="print-footer-inner w-full flex justify-center items-center text-[10px] text-gray-400 border-t border-gray-200 pt-2 bg-transparent pb-2 px-8">
-                <div>تم إنشاء هذا الاختبار في منصة التعلّم الذكي - جميع الحقوق محفوظة للمدرّس حسن راشد العلي</div>
+        {headerConfig.showFooter ? (
+          isEditing ? (
+            <div className="no-print mt-4 p-2.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center gap-2">
+              <span className="text-xs font-bold text-slate-600 shrink-0">التذييل (Footer):</span>
+              <input
+                type="text"
+                value={headerConfig.footerText}
+                onChange={(e) => updateHeaderConfig({ footerText: e.target.value })}
+                className="flex-1 text-xs font-bold bg-emerald-50 border border-emerald-300 rounded-lg px-2.5 py-1"
+              />
+              <button
+                type="button"
+                onClick={() => updateHeaderConfig({ showFooter: false })}
+                className="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg border border-red-200 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+              >
+                <Trash size={12} /> حذف التذييل
+              </button>
             </div>
-        </div>
+          ) : (
+            <div className={`print-test-footer ${printPreview ? 'block mt-6' : 'hidden print:table-footer-group'}`}>
+              <div className="print-footer-inner w-full flex justify-center items-center text-[10px] text-gray-500 border-t border-gray-200 pt-2 bg-transparent pb-2 px-8">
+                <div>{headerConfig.footerText}</div>
+              </div>
+            </div>
+          )
+        ) : (
+          isEditing && (
+            <div className="no-print flex justify-center mt-3">
+              <button
+                type="button"
+                onClick={() => updateHeaderConfig({ showFooter: true })}
+                className="px-3 py-1 text-xs font-bold bg-white border border-emerald-200 text-emerald-700 rounded-lg cursor-pointer"
+              >
+                + استعادة تذييل الصفحة
+              </button>
+            </div>
+          )
+        )}
       </div>
 
       <QuestionDesignerModal 

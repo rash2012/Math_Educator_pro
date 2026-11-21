@@ -31,6 +31,7 @@ import {
 import {
   saveExerciseFamilyAtomic,
   loadUnitExerciseFamilies,
+  clearUnitExerciseFamiliesExceptAtomic,
   type ClassifiedFamilyData,
   type ClassifiedExercise,
   type ClassifiedStation
@@ -65,6 +66,8 @@ export const ExerciseFamiliesModal: React.FC<ExerciseFamiliesModalProps> = ({
   // Modals & Dialogs
   const [editingFamilyIdx, setEditingFamilyIdx] = useState<number | null>(null);
   const [confirmRegenFamIdx, setConfirmRegenFamIdx] = useState<number | null>(null);
+  const [confirmFullReclassify, setConfirmFullReclassify] = useState<boolean>(false);
+  const [pendingReclassCleanup, setPendingReclassCleanup] = useState<boolean>(false);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
   const [saveLoading, setSaveLoading] = useState<boolean>(false);
 
@@ -141,6 +144,37 @@ export const ExerciseFamiliesModal: React.FC<ExerciseFamiliesModalProps> = ({
     setExpandedExerciseIds(next);
   };
 
+  const executeFullReclassification = async () => {
+    setConfirmFullReclassify(false);
+    setLoading(true);
+    setProgressPct(10);
+    setProgressMsg('جاري إعادة استقراء كافة التمرينات والمسائل وتصنيفها من جديد ضمن عائلات...');
+
+    try {
+      const generated = await classifyAndGenerateExerciseFamiliesAI(
+        docId,
+        unitTitle,
+        exercises,
+        (phase, msg, pct) => {
+          setProgressMsg(msg);
+          setProgressPct(pct);
+        }
+      );
+
+      setFamilies(generated);
+      setActiveTabIdx(0);
+      setExpandedExerciseIds(new Set());
+      setPendingReclassCleanup(true);
+      setSaveSuccessMsg('تمت إعادة تصنيف كافة التمرينات والمسائل ضمن عائلات جديدة بنجاح! راجع النتائج ثم اضغط «حفظ كافة العائلات» لتثبيتها.');
+      setTimeout(() => setSaveSuccessMsg(null), 6000);
+    } catch (err: any) {
+      console.error('Full reclassification error:', err);
+      alert(`حدث خطأ أثناء إعادة التصنيف: ${err.message || err}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // 1. Save single family atomic
   const handleSaveSingleFamily = async (famIdx: number) => {
     const fam = families[famIdx];
@@ -148,6 +182,14 @@ export const ExerciseFamiliesModal: React.FC<ExerciseFamiliesModalProps> = ({
 
     setSaveLoading(true);
     try {
+      if (pendingReclassCleanup) {
+        const keptIds = families
+          .map(f => f.id)
+          .filter((id): id is number | string => id !== undefined && id !== null);
+        await clearUnitExerciseFamiliesExceptAtomic(docId, keptIds);
+        setPendingReclassCleanup(false);
+      }
+
       const savedId = await saveExerciseFamilyAtomic(docId, fam);
       
       setFamilies(prev => prev.map((f, idx) => {
@@ -175,14 +217,24 @@ export const ExerciseFamiliesModal: React.FC<ExerciseFamiliesModalProps> = ({
   const handleSaveAllFamilies = async () => {
     setSaveLoading(true);
     try {
-      for (let i = 0; i < families.length; i++) {
-        const fam = families[i];
-        const savedId = await saveExerciseFamilyAtomic(docId, fam);
-        families[i].id = savedId;
-        families[i].saved = true;
+      if (pendingReclassCleanup) {
+        await clearUnitExerciseFamiliesExceptAtomic(docId, []);
+        setPendingReclassCleanup(false);
       }
 
-      setFamilies([...families]);
+      const updatedFamilies = [...families];
+      for (let i = 0; i < updatedFamilies.length; i++) {
+        const fam = updatedFamilies[i];
+        const savedId = await saveExerciseFamilyAtomic(docId, fam);
+        updatedFamilies[i] = { ...fam, id: savedId, saved: true };
+      }
+
+      const keptIds = updatedFamilies
+        .map(f => f.id)
+        .filter((id): id is number | string => id !== undefined && id !== null);
+      await clearUnitExerciseFamiliesExceptAtomic(docId, keptIds);
+
+      setFamilies(updatedFamilies);
       setSaveSuccessMsg('تم حفظ واعتماد كافة عائلات التمارين ومحطاتها وإجاباتها بنجاح! 🎉');
       setTimeout(() => setSaveSuccessMsg(null), 5000);
       if (onSavedAll) onSavedAll();
@@ -414,7 +466,19 @@ export const ExerciseFamiliesModal: React.FC<ExerciseFamiliesModalProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5 flex-wrap">
+            {families.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setConfirmFullReclassify(true)}
+                disabled={saveLoading || loading}
+                className="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white rounded-xl text-xs font-bold shadow-sm transition flex items-center gap-1.5 cursor-pointer"
+                title="إعادة تصنيف كافة التمرينات والمسائل في هذه الوحدة من جديد ضمن عائلات وتوليد محطات الحل"
+              >
+                <RefreshCw className="w-4 h-4" />
+                <span>إعادة تصنيف جديد</span>
+              </button>
+            )}
             <button
               onClick={handleSaveAllFamilies}
               disabled={saveLoading || loading || families.length === 0}
@@ -957,6 +1021,44 @@ export const ExerciseFamiliesModal: React.FC<ExerciseFamiliesModalProps> = ({
                   className="px-4 py-2 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-xl transition cursor-pointer"
                 >
                   نعم، أعد التوليد
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ==================================================================== */}
+        {/* Confirmation Dialog for Full Reclassification                        */}
+        {/* ==================================================================== */}
+        {confirmFullReclassify && (
+          <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+            <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 space-y-4 border border-slate-200 animate-in fade-in zoom-in-95">
+              <div className="flex items-center gap-3 text-amber-600">
+                <div className="p-2 bg-amber-100 rounded-xl">
+                  <AlertTriangle className="w-6 h-6" />
+                </div>
+                <h3 className="text-base font-bold text-slate-800">تأكيد إعادة التصنيف الشامل</h3>
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed font-arabic">
+                سيتم إعادة تحليل وتصنيف <strong>كافة التمرينات والمسائل ({exercises.length})</strong> في هذه الوحدة من جديد ضمن عائلات مفاهيمية وتوليد محطات الحل والخيارات لها بالكامل.
+                <br />
+                لن تُحفظ التغييرات نهائياً إلا بعد مراجعتها والضغط على <strong>«حفظ كافة العائلات»</strong>. هل تريد المتابعة؟
+              </p>
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setConfirmFullReclassify(false)}
+                  className="px-4 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  onClick={executeFullReclassification}
+                  className="px-4 py-2 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-xl transition cursor-pointer flex items-center gap-1.5"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>نعم، إعادة تصنيف جديد</span>
                 </button>
               </div>
             </div>

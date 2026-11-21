@@ -4992,3 +4992,168 @@ export async function extractPracticeExerciseFromImage(
   }
   return parsed;
 }
+
+export interface ExtractSolutionFromPdfParams {
+  exerciseTitle: string;
+  exerciseQuestionText: string;
+  pdfBase64: string;
+  mimeType?: string;
+  userInstructions?: string;
+  sectionTitle?: string;
+}
+
+export interface ExtractSolutionFromPdfResult {
+  isMatch: boolean;
+  mismatchReason?: string;
+  detectedExerciseSummary?: string;
+  solutionText?: string;
+  strategyText?: string;
+}
+
+/**
+ * استخراج حل تمرين محدد من ملف PDF مرفوع مع التحقق من مطابقة الحل للتمرين النشط
+ * وتنفيذ تعليمات المستخدم الاختيارية لصياغة الحل وفق معايير المنهاج السوري و LaTeX.
+ */
+export async function extractExerciseSolutionFromPdfAI(
+  params: ExtractSolutionFromPdfParams
+): Promise<ExtractSolutionFromPdfResult> {
+  const {
+    exerciseTitle,
+    exerciseQuestionText,
+    pdfBase64,
+    mimeType = 'application/pdf',
+    userInstructions = '',
+    sectionTitle = ''
+  } = params;
+
+  const cleanBase64 = (pdfBase64 || '').replace(/^data:[^;]+;base64,/, '').trim();
+  if (!cleanBase64) {
+    throw new Error('ملف PDF المرفوع فارغ أو غير صالح.');
+  }
+
+  const trimmedQuestion = (exerciseQuestionText || '').trim();
+  const trimmedInstructions = (userInstructions || '').trim();
+
+  const prompt = `
+أنت أستاذ رياضيات خبير ومصحح تربوي دقيق وفق المنهاج السوري للثالث الثانوي العلمي، ومختص بقراءة ملفات PDF الرياضية (المطبوعة أو المكتوبة بخط اليد) واستخراج الحلول بدقة 100%.
+
+مهمتك تتكون من مرحلتين إلزاميتين بالترتيب:
+
+=== المرحلة 1: التحقق الصارم من مطابقة ملف PDF للتمرين النشط ===
+التمرين النشط المطلوب إضافة الحل له:
+- العنوان: "${exerciseTitle || 'تمرين'}"
+${sectionTitle ? `- الكراسة / القسم: "${sectionTitle}"` : ''}
+- نص التمرين النشط:
+"""
+${trimmedQuestion || '(نص التمرين غير متوفر)'}
+"""
+
+افحص محتوى ملف PDF المرفق بدقة (النصوص، التوابع، الأرقام، النقاط الهندسية، المعطيات، والطلبات):
+1. هل يحتوي ملف PDF على حل يطابق التمرين النشط فعلاً (نفس المسألة / نفس التابع / نفس المعطيات والطلبات حتى لو اختلف الترقيم أو الشكل الطباعي)؟
+2. في حال كان ملف PDF يحتوي على حلول عدة تمارين (مثلاً ملف حلول الوحدة كاملة)، فإذا وُجد حل التمرين النشط من ضمنها يعتبر مطابقاً ("isMatch": true)، وعليك استخراج حل **هذا التمرين النشط فقط** وإهمال بقية التمارين.
+3. أما إذا كان ملف PDF لا يحتوي على حل هذا التمرين، أو كان الحل الموجود فيه يخص تمريناً مختلفاً أو مسألة مختلفة تماماً في المعطيات أو التوابع أو الطلبات:
+   - اجعل "isMatch": false فوراً.
+   - اكتب في "mismatchReason" سبباً واضحاً ومحدداً بالعربية يوضح عدم التطابق (مثال: "الحل الموجود في ملف PDF يخص دراسة تغيرات التابع $g(x)=...$ بينما التمرين النشط يطلب حساب نهايات التابع $f(x)=...$").
+   - اكتب في "detectedExerciseSummary" ملخصاً قصيراً للتمرين أو الحل الذي تم رصده فعلياً داخل ملف PDF.
+   - اترك "solutionText": "" و "strategyText": "".
+
+${trimmedInstructions ? `=== تعليمات المستخدم الخاصة لاستخراج وصياغة الحل (يجب الالتزام بها بدقة عند التطابق) ===
+"""
+${trimmedInstructions}
+"""
+` : ''}
+=== المرحلة 2: استخراج وتنسيق الحل (فقط عندما تكون isMatch: true) ===
+1. استخرج حل التمرين النشط من ملف PDF بدقة كاملة، ورتب الخطوات بالترقيم الدائري المغلق (①، ②، ③...).
+2. 💡 فصل فكرة واستراتيجية الحل في "strategyText" (اختياري وموجز 2-4 أسطر فقط إذا اتضحت الفكرة المفتاحية للحل، وبدون تكرار خطوات الحل الحسابية التفصيلية وبدون تكرار داخل solutionText).
+3. 🔑 وضع خطوات الحل الفعلية فقط في "solutionText" بدون أي مقدمات فوقية.
+4. الالتزام الصارم بضوابط المنهاج السوري و LaTeX:
+   - كافة الرموز والمعادلات الرياضية داخل علامة الدولار المفردة $...$ حصراً (يُمنع منعاً باتاً استخدام $$).
+   - المتجه بحرف واحد: $\\vec{u}$ ، والمتجه بحرفين: $\\overrightarrow{AB}$.
+   - المجالات المفتوحة بصيغة $]a, b[$ والمغلقة $[a, b]$.
+   - استخدام مصطلح "تابع" حصراً ومنع كلمة "دالة".
+   - عدم استخدام رمز $\\sum$ للمجاميع المنتهية (استخدم $\\cdots$)، وعدم استخدام الجداء الخارجي.
+   - العناوين الرئيسية داخل الحل بصيغة \`*العنوان:*\` (أحمر)، والفرعية \`*#العنوان الفرعي:#*\` (أزرق)، والقوانين العامة \`***القانون***\`، والتظليل الداخلي فقط \` **عبارة** \` (يُمنع استخدام \`**...**\` كعنوان فقرة).
+
+أخرج كائن JSON نظيفاً حصراً بالصيغة التالية:
+{
+  "isMatch": true,
+  "mismatchReason": "",
+  "detectedExerciseSummary": "ملخص مختصر للتمرين المرصود في ملف PDF",
+  "strategyText": "",
+  "solutionText": ""
+}
+`;
+
+  const response = await generateWithFallback(MODELS_FALLBACK, {
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          { text: prompt },
+          {
+            inlineData: {
+              mimeType: mimeType || 'application/pdf',
+              data: cleanBase64
+            }
+          }
+        ]
+      }
+    ],
+    config: {
+      temperature: 0.15,
+      responseMimeType: 'application/json'
+    }
+  });
+
+  const parsed = cleanJson(response.text || '{}');
+
+  if (!parsed || parsed.isMatch === false) {
+    return {
+      isMatch: false,
+      mismatchReason:
+        parsed?.mismatchReason ||
+        'الحل المرفق في ملف PDF لا يطابق نص التمرين النشط الحالي.',
+      detectedExerciseSummary: parsed?.detectedExerciseSummary || ''
+    };
+  }
+
+  const rawSolution = String(parsed.solutionText || '').trim();
+  const rawStrategy = String(parsed.strategyText || '').trim();
+
+  if (!rawSolution) {
+    return {
+      isMatch: false,
+      mismatchReason:
+        parsed?.mismatchReason ||
+        'تعذر استخراج خطوات حل واضحة للتمرين النشط من ملف PDF المرفوع.',
+      detectedExerciseSummary: parsed?.detectedExerciseSummary || ''
+    };
+  }
+
+  const preSeparated = separateStrategyAndSolution(rawSolution, rawStrategy);
+
+  const auditedSol = await correctionAgent.reviewAndCorrectSolution(
+    preSeparated.cleanSolution,
+    {
+      questionText: trimmedQuestion,
+      title: exerciseTitle,
+      generatorModel: 'gemini-3.8-flash'
+    }
+  );
+
+  const validatedStrat = preSeparated.cleanStrategy
+    ? await correctionAgent.reviewAndCorrectText(preSeparated.cleanStrategy, {
+        title: `${exerciseTitle} (استراتيجية)`,
+        generatorModel: 'gemini-3.8-flash'
+      })
+    : '';
+
+  const finalSeparated = separateStrategyAndSolution(auditedSol, validatedStrat);
+
+  return {
+    isMatch: true,
+    detectedExerciseSummary: parsed.detectedExerciseSummary || '',
+    solutionText: finalSeparated.cleanSolution,
+    strategyText: finalSeparated.cleanStrategy
+  };
+}

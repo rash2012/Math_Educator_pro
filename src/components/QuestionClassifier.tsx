@@ -502,7 +502,8 @@ ${misconceptionsText.substring(0, 2000)}
                   changed = true;
                   return {
                     ...q,
-                    difficulty: res.proposedLevel,
+                    difficulty: res.proposedLevel <= 2 ? 'easy' : res.proposedLevel === 3 ? 'medium' : 'hard',
+                    difficultyLevel: res.proposedLevel,
                     difficulty_level: res.proposedLevel,
                     topic: res.proposedConcept !== 'غير محدد' ? res.proposedConcept : null
                   };

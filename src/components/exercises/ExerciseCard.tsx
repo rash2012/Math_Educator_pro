@@ -4,7 +4,7 @@ import { MathRenderer } from '../MathRenderer';
 import { cleanAndEnforceMathSvg, cleanStrategyMetaHeaders } from '../../services/gemini';
 import { 
   Edit3, CheckCircle, Sparkles, Scissors, ImageIcon, 
-  Copy, CopyCheck, CopyPlus, Trash2, Loader2 
+  Copy, CopyCheck, CopyPlus, Trash2, Loader2, FileUp 
 } from 'lucide-react';
 
 interface ExerciseCardProps {
@@ -17,6 +17,7 @@ interface ExerciseCardProps {
   onEdit: () => void;
   onVerify: () => void;
   onGenerateSolution: () => void;
+  onAddSolutionFromPdf?: () => void;
   onRegenerateStrategy?: () => void;
   onShortenSolution: () => void;
   onGenerateSvg: () => void;
@@ -34,6 +35,7 @@ export const ExerciseCard: React.FC<ExerciseCardProps> = ({
   onEdit,
   onVerify,
   onGenerateSolution,
+  onAddSolutionFromPdf,
   onRegenerateStrategy,
   onShortenSolution,
   onGenerateSvg,
@@ -117,6 +119,19 @@ export const ExerciseCard: React.FC<ExerciseCardProps> = ({
             {isCurrentLoading('solution') ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
             <span>الحل النموذجي</span>
           </button>
+
+          {/* Add Solution from PDF */}
+          {onAddSolutionFromPdf && (
+            <button
+              type="button"
+              onClick={onAddSolutionFromPdf}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-50 hover:bg-teal-100 text-teal-800 text-xs font-black rounded-xl border border-teal-200 transition-all cursor-pointer shadow-2xs"
+              title="إضافة الحل عن طريق رفع ملف PDF مع إمكانية كتابة تعليمات ومطابقة التمرين النشط"
+            >
+              <FileUp size={13} />
+              <span>إضافة الحل</span>
+            </button>
+          )}
 
           {/* AI Strategy if missing */}
           {!exercise.strategyText?.trim() && onRegenerateStrategy && (
